@@ -2,7 +2,12 @@
 name = "mdtext"
 version = "0.1.0"
 edition = "2024"
-license = "mpl-2.0"
+license = "MPL-2.0"
+description = "An incremental/streaming markdown parser compliant with CommonMark/GFM."
+repository = "https://github.com/kirawi/mdtext"
+categories = ["parser-implementations", "text-processing"]
+keywords = ["markdown", "commonmark", "gfm"]
+include = ["src/**", "README.md", "LICENSE"]
 
 [lib]
 name = "mdtext"
