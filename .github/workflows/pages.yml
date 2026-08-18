@@ -1,0 +1,69 @@
+name: Deploy WASM playground to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Run native tests
+        run: cargo test --locked --all-targets
+
+      - name: Check WASM target
+        run: cargo check --locked --package mdtext-wasm --target wasm32-unknown-unknown
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build static site and WASM package
+        run: |
+          mkdir -p _site
+          cp -R site/. _site/
+          wasm-pack build wasm --target web --release --out-dir ../_site/pkg --out-name mdtext
+          touch _site/.nojekyll
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+
+      - name: Check browser code
+        run: |
+          node --check site/app.js
+          node --check site/preview-worker.js
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

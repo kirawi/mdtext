@@ -1,0 +1,40 @@
+[package]
+name = "mdtext"
+version = "0.1.0"
+edition = "2024"
+license = "mpl-2.0"
+
+[lib]
+name = "mdtext"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[workspace]
+members = ["wasm"]
+default-members = ["."]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "mdtext"
+path = "src/main.rs"
+
+[dependencies]
+unicode-general-category = "1.1.0"
+memchr = "2.8.3"
+smallvec = "1"
+
+[dev-dependencies]
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+
+criterion = { version = "0.8" }
+pulldown-cmark = { version = "0.13" }
+rand = { version = "0.10" }
+
+[[bench]]
+name = "pcm"
+harness = false

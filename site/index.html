@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'">
+  <title>mdtext — streaming Markdown in WebAssembly</title>
+  <meta name="description" content="A live demonstration of mdtext's streaming Markdown parser running in WebAssembly.">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header>
+    <h1>mdtext</h1>
+    <p>A streaming Markdown parser, running in your browser through WebAssembly.</p>
+    <nav aria-label="Project links">
+      <a href="https://github.com/kirawi/mdtext">source code</a>
+      <span aria-hidden="true"> · </span>
+      <button id="replay" type="button" disabled>replay stream</button>
+      <span aria-hidden="true"> · </span>
+      <label class="speed-control" for="stream-speed">
+        stream speed
+        <input id="stream-speed" type="range" min="-2" max="3" step="0.5" value="0">
+        <output id="stream-speed-value" for="stream-speed">1×</output>
+      </label>
+      <span aria-hidden="true"> · </span>
+      <label class="instant-control" for="instant-mode">
+        <input id="instant-mode" type="checkbox">
+        instant
+      </label>
+    </nav>
+    <p class="demo-note">Streaming mode feeds fixed-size chunks so its speed stays consistent for every document. It is intentionally <i>much, much</i> slower than the parser so that you can see what's happening; use instant mode for large files.</p>
+  </header>
+
+  <main>
+    <section aria-labelledby="input-heading">
+      <h2 id="input-heading">Markdown input</h2>
+      <textarea id="editor" aria-label="Markdown input" readonly spellcheck="false"></textarea>
+    </section>
+
+    <section aria-labelledby="output-heading">
+      <h2 id="output-heading">HTML output</h2>
+      <iframe id="preview" title="Rendered Markdown output" sandbox="allow-same-origin"></iframe>
+    </section>
+  </main>
+
+  <footer aria-live="polite">
+    <span class="stream-state"><i id="input-signal" class="signal" aria-hidden="true"></i><span id="input-status">loading input</span></span>
+    <span class="stream-state"><i id="output-signal" class="signal" aria-hidden="true"></i><span id="output-status">loading renderer</span></span>
+  </footer>
+
+  <aside class="disclosure">Demo site generated with AI.<br>The mdtext library is human-written.</aside>
+
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js" integrity="sha384-cMkvdD8LoxVzGF/RPUKAcvmm49FQ0oxwDF3BGKtDXcEc+T1b2N+teh/OJfpU0jr6" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.12.0/build/highlight.min.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
