@@ -20,6 +20,7 @@ let options = 0;
 let generation = 0;
 let editTimer;
 let activeOutput;
+let activeOutputId = null;
 let sampleMarkdown = '';
 let follow = true;
 let paintQueued = false;
@@ -49,7 +50,7 @@ function waitForActivation(worker) {
 }
 
 async function registerPreviewWorker() {
-    const registration = await navigator.serviceWorker.register('./preview-worker.js?v=katex-3', {
+    const registration = await navigator.serviceWorker.register('./preview-worker.js?v=streams-4', {
         scope: './',
         updateViaCache: 'none',
     });
@@ -288,7 +289,10 @@ function pendingInput() {
 async function renderInstantly(markdown) {
     const current = ++generation;
     const output = await createOutputStream(current);
-    if (current !== generation) return;
+    if (current !== generation) {
+        closeOutputStream(output, current, 'cancel');
+        return;
+    }
 
     editor.readOnly = false;
     replay.disabled = true;
@@ -306,15 +310,14 @@ async function renderInstantly(markdown) {
             type: 'chunk',
             html
         });
-        output.postMessage({
-            type: 'close'
-        });
+        closeOutputStream(output, current, 'close');
         inputSignal.classList.remove('active');
         outputSignal.classList.remove('active');
         inputStatus.textContent = 'input complete';
         outputStatus.textContent = `parsed in ${formatDuration(duration)}`;
         replay.disabled = false;
     } catch (error) {
+        closeOutputStream(output, current, 'cancel');
         streamComplete = true;
         inputSignal.classList.remove('active');
         outputSignal.classList.remove('active');
@@ -332,14 +335,34 @@ function renderCurrent(markdown, streamingOptions) {
 
 async function createOutputStream(id) {
     if (activeOutput) {
-        activeOutput.close();
+        // Closing a MessagePort does not notify the service worker. Explicitly
+        // cancel the old stream so it cannot remain in the worker's stream map
+        // after this render supersedes it.
+        try {
+            activeOutput.postMessage({
+                type: 'cancel'
+            });
+        } catch {
+            // The worker may already have closed the port after a completed
+            // stream; there is nothing left to clean up in that case.
+        }
         activeOutput = null;
+        activeOutputId = null;
     }
 
     const registration = await workerRegistration;
     const channel = new MessageChannel();
     await new Promise((resolve, reject) => {
-        const timeout = window.setTimeout(() => reject(new Error('Preview stream did not start')), 3000);
+        const timeout = window.setTimeout(() => {
+            try {
+                channel.port1.postMessage({
+                    type: 'cancel'
+                });
+            } catch {
+                // There may be no worker endpoint if startup failed.
+            }
+            reject(new Error('Preview stream did not start'));
+        }, 3000);
         channel.port1.onmessage = event => {
             if (event.data?.type !== 'ready') return;
             window.clearTimeout(timeout);
@@ -360,7 +383,25 @@ async function createOutputStream(id) {
     preview.src = `./preview-stream?id=${encodeURIComponent(id)}`;
     window.requestAnimationFrame(() => monitorFrame(id));
     activeOutput = channel.port1;
+    activeOutputId = id;
     return channel.port1;
+}
+
+function closeOutputStream(output, id, messageType) {
+    if (!output) return;
+    try {
+        output.postMessage({
+            type: messageType
+        });
+    } catch {
+        // The worker can close its side immediately after receiving `close`.
+    }
+    // Leave the port open long enough for the worker to receive the control
+    // message. The worker closes its side after handling it.
+    if (activeOutput === output && activeOutputId === id) {
+        activeOutput = null;
+        activeOutputId = null;
+    }
 }
 
 async function streamDocument(markdown, {
@@ -374,6 +415,7 @@ async function streamDocument(markdown, {
     let offset = 0;
 
     if (current !== generation) {
+        closeOutputStream(output, current, 'cancel');
         renderer.free();
         return;
     }
@@ -390,7 +432,10 @@ async function streamDocument(markdown, {
 
     try {
         while (offset < markdown.length) {
-            if (current !== generation) return;
+            if (current !== generation) {
+                closeOutputStream(output, current, 'cancel');
+                return;
+            }
             let end = Math.min(offset + chunkSize, markdown.length);
             const finalUnit = markdown.charCodeAt(end - 1);
             const nextUnit = markdown.charCodeAt(end);
@@ -424,7 +469,10 @@ async function streamDocument(markdown, {
             else await nextFrame();
         }
 
-        if (current !== generation) return;
+        if (current !== generation) {
+            closeOutputStream(output, current, 'cancel');
+            return;
+        }
         const finalUpdate = readUpdate(renderer.finish());
         if (finalUpdate.html) {
             output.postMessage({
@@ -432,9 +480,7 @@ async function streamDocument(markdown, {
                 html: finalUpdate.html
             });
         }
-        output.postMessage({
-            type: 'close'
-        });
+        closeOutputStream(output, current, 'close');
         revealSource = null;
         inputSignal.classList.remove('active');
         outputSignal.classList.remove('active');
@@ -443,6 +489,7 @@ async function streamDocument(markdown, {
         editor.readOnly = false;
         replay.disabled = false;
     } catch (error) {
+        closeOutputStream(output, current, 'cancel');
         streamComplete = true;
         revealSource = null;
         inputSignal.classList.remove('active');

@@ -16,8 +16,24 @@ function closeStream(id, state) {
     }
     if (state.controller) {
         state.port.close();
-        streams.delete(id);
+        if (streams.get(id) === state) streams.delete(id);
     }
+}
+
+function cancelStream(id, state) {
+    // A render can be superseded before its fetch has attached a stream
+    // controller. Unlike normal close, cancellation must remove that state
+    // immediately or its queued chunks and MessagePort remain reachable.
+    if (state.controller) {
+        try {
+            state.controller.error(new Error('preview stream cancelled'));
+        } catch {
+            // The response may already have been cancelled by iframe
+            // navigation.
+        }
+    }
+    state.port.close();
+    if (streams.get(id) === state) streams.delete(id);
 }
 
 self.addEventListener('message', event => {
@@ -38,6 +54,8 @@ self.addEventListener('message', event => {
             else state.chunks.push(bytes);
         } else if (message.data?.type === 'close') {
             closeStream(id, state);
+        } else if (message.data?.type === 'cancel') {
+            cancelStream(id, state);
         }
     };
     state.port.start();
@@ -70,7 +88,7 @@ self.addEventListener('fetch', event => {
         },
         cancel() {
             state.port.close();
-            streams.delete(id);
+            if (streams.get(id) === state) streams.delete(id);
         },
     });
 
