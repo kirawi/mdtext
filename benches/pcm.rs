@@ -44,7 +44,7 @@ fn bench_mdtext(c: &mut Criterion) {
     let bytes = corpus_bytes();
     let mut group = c.benchmark_group("mdtext");
     group.throughput(Throughput::Bytes(bytes as u64));
-    group.measurement_time(Duration::from_secs(60));
+    group.measurement_time(Duration::from_secs(120));
 
     group.bench_function("parse", |b| {
         b.iter(|| {
@@ -72,7 +72,7 @@ fn bench_pcm(c: &mut Criterion) {
     let opts = pcm_gfm_options();
     let mut group = c.benchmark_group("pulldown_cmark");
     group.throughput(Throughput::Bytes(bytes as u64));
-    group.measurement_time(Duration::from_secs(60));
+    group.measurement_time(Duration::from_secs(120));
 
     group.bench_function("parse", |b| {
         b.iter(|| {

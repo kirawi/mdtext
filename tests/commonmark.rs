@@ -99,6 +99,24 @@ fn type_7_html_block_is_not_a_lazy_container_continuation() {
 }
 
 #[test]
+fn raw_html_blocks_close_only_on_their_matching_tag() {
+    assert_eq!(
+        parse("<script>\n</style>\ninside\n</script>\nafter\n"),
+        vec![
+            Event::Start(Tag::HtmlBlock),
+            Event::Html("<script>\n".into()),
+            Event::Html("</style>\n".into()),
+            Event::Html("inside\n".into()),
+            Event::Html("</script>\n".into()),
+            Event::End,
+            Event::Start(Tag::Paragraph),
+            Event::Text("after".into()),
+            Event::End,
+        ]
+    );
+}
+
+#[test]
 fn bullet_item_content_is_not_scanned_as_a_table_delimiter() {
     assert_eq!(
         parse("intro:\n- |M| = x\n- :value\n"),

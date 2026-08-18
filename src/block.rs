@@ -433,6 +433,7 @@ enum HtmlKind {
 impl HtmlKind {
     fn is_terminated_by(self, bytes: &[u8]) -> bool {
         match self {
+            // Might be faster to directly compare `</tag>`? micro-opt
             Self::RawTag(tag) => bytes.windows(tag.len() + 3).any(|window| {
                 window.starts_with(b"</")
                     && window[2..window.len() - 1].eq_ignore_ascii_case(tag)
