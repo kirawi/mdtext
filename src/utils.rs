@@ -52,16 +52,14 @@ impl<'a, 's> Ld<'a, 's> {
 
     #[inline]
     pub fn text(&self) -> &'a str {
-        // SAFETY: `self.bytes` is derived from valid ASCII byte offsets on an already valid UTF-8 string, and
-        // thus will not be invalid UTF-8 here.
+        // SAFETY: `self.bytes` is the verbatim `&str` content passed on `Parser::feed`. Therefore, it is always
+        // valid UTF-8.
         unsafe { std::str::from_utf8_unchecked(self.bytes) }
     }
 
     #[inline]
     pub fn text_here(&self) -> &'a str {
-        // SAFETY: `self.bytes` is derived from valid ASCII byte offsets on an already valid UTF-8 string, and
-        // thus will not be invalid UTF-8 here.
-        unsafe { std::str::from_utf8_unchecked(&self.bytes[self.pos..]) }
+        &self.text()[self.pos..self.len]
     }
 
     /// The byte at the cursor, or `None` once the end has been reached.
@@ -81,10 +79,7 @@ impl<'a, 's> Ld<'a, 's> {
         if b.is_ascii() {
             Some(b as char)
         } else {
-            // SAFETY: doc content is valid UTF-8.
-            unsafe { std::str::from_utf8_unchecked(&self.bytes[self.pos..self.len]) }
-                .chars()
-                .next()
+            self.text_here().chars().next()
         }
     }
 
@@ -96,19 +91,6 @@ impl<'a, 's> Ld<'a, 's> {
     /// Returns the byte after the cursor without advancing.
     pub fn peek_next(&self) -> Option<u8> {
         self.buf().get(self.pos + 1).copied()
-    }
-
-    /// Moves the cursor to `pos`.
-    #[inline]
-    pub fn seek(&mut self, pos: usize) {
-        debug_assert!(pos <= self.len);
-        self.pos = pos;
-    }
-
-    /// Advances the cursor by `n` bytes.
-    #[inline]
-    pub fn advance(&mut self, n: usize) {
-        self.pos += n;
     }
 
     /// Start of the first span (begin of content).
@@ -203,40 +185,55 @@ impl<'a, 's> Ld<'a, 's> {
             return None;
         }
 
-        let bytes = &self.bytes[location.pos..span.end];
-        if bytes[0].is_ascii() {
-            Some(bytes[0] as char)
+        if self.bytes[location.pos].is_ascii() {
+            Some(self.bytes[location.pos] as char)
         } else {
-            unsafe { std::str::from_utf8_unchecked(bytes) }
-                .chars()
-                .next()
+            self.text()[location.pos..span.end].chars().next()
         }
     }
 
     /// Returns the unicode char prior to the pointed location
     pub fn char_before_location(&self, location: Location) -> Option<char> {
-        let span = self.spans.get(location.span_idx)?;
+        let span = self.get_span_unchecked(location.span_idx);
         let end = if location.pos > span.start {
             location.pos
         } else {
-            self.spans.get(location.span_idx.checked_sub(1)?)?.end
+            self.get_span_unchecked(location.span_idx.checked_sub(1)?)
+                .end
         };
 
-        if end == 0 || end > self.len {
-            return None;
+        // `src/block.rs` prevents `Span`s of `0..0` by construction. Blank lines between paragraphs are always
+        // treated as paragraph separators.
+        //
+        // **Example:**
+        //
+        // ```
+        // hello,
+        //              <-- empty line! `0..0` range!
+        // world!
+        // ```
+        //
+        // becomes
+        //
+        // ```html
+        // <p>hello,</p>
+        // <p>world!</p>
+        // ````
+        debug_assert!(end != 0 && end < self.len);
+        // ASCII fast path
+        if self.bytes[end - 1] < 0x80 {
+            return Some(self.bytes[end - 1] as char);
         }
-        let buf = self.buf();
-        // ASCII fast path — no UTF-8 validation needed.
-        if buf[end - 1] < 0x80 {
-            return Some(buf[end - 1] as char);
-        }
+
         let mut start = end - 1;
-        while start > 0 && end - start < 4 && buf[start] & 0xC0 == 0x80 {
+
+        // `start` may be in the middle of a multi-byte char, and so we must skip backwards over continuation bytes
+        // i.e. contain 0xC0.
+        while start > 0 && end - start < 4 && self.bytes[start] & 0xC0 == 0x80 {
             start -= 1;
         }
-        unsafe { std::str::from_utf8_unchecked(&buf[start..end]) }
-            .chars()
-            .next()
+
+        self.text()[start..end].chars().next()
     }
 
     /// Move to the preceding byte of logical content. At a span boundary this
@@ -258,12 +255,23 @@ impl<'a, 's> Ld<'a, 's> {
         }
     }
 
+    fn get_span_unchecked(&self, span_idx: usize) -> &Span {
+        debug_assert!(span_idx < self.spans.len());
+
+        // SAFETY: Strictly speaking, it is possible to reach a `Location` that goes out-of-bounds. However,
+        // `inline.rs` has been designed such that `pos` and `span_idx` always stay in sync (i.e. one never advances
+        // to the next span ahead of the other). Therefore, it is the case that `span_idx >= self.spans.len()` IFF
+        // `pos >= self.pos.len()`. All parsing functions **must first** check that their `pos` is always in-bounds,
+        // exiting if not, and therefore there is never a case in which `span_idx >= self.spans.len()` by this
+        // function call.
+        unsafe { self.spans.get_unchecked(span_idx) }
+    }
+
     /// Advance by one byte of logical paragraph content, jumping over any
     /// stripped prefix gap. Returns false after moving to the terminal end.
     #[inline]
     pub fn advance_location(&self, location: &mut Location) -> bool {
-        // SAFETY: Only valid Locations are EVER constructed via the methods here`
-        let span = unsafe { self.spans.get_unchecked(location.span_idx) };
+        let span = self.get_span_unchecked(location.span_idx);
         debug_assert!(location.pos >= span.start && location.pos < span.end);
 
         // Bounds check
@@ -352,14 +360,13 @@ impl<'a, 's> Ld<'a, 's> {
             return Cow::Borrowed("");
         }
         if self.contiguous {
-            // SAFETY: callers only ever use ranges over valid UTF-8 doc content.
-            return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(&self.bytes[range]) });
+            return Cow::Borrowed(&self.text()[range]);
         }
+
         // Non-contiguous: check if range is within a single span inline.
         for span in self.spans {
             if range.start >= span.start && range.end <= span.end {
-                // SAFETY: callers only ever use ranges over valid UTF-8 doc content.
-                return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(&self.bytes[range]) });
+                return Cow::Borrowed(&self.text()[range]);
             }
         }
         // Need to concatenate if it's multiline
@@ -376,9 +383,7 @@ impl<'a, 's> Ld<'a, 's> {
             }
             let start = range.start.max(span.start);
             let end = range.end.min(span.end);
-
-            // SAFETY: valid UTF-8 doc content.
-            result.push_str(unsafe { std::str::from_utf8_unchecked(&self.bytes[start..end]) });
+            result.push_str(&self.text()[start..end]);
         }
         Cow::Owned(result)
     }
@@ -394,8 +399,7 @@ impl<'a, 's> Ld<'a, 's> {
         if range.start >= range.end {
             return Cow::Borrowed("");
         }
-        // SAFETY: callers only ever use ranges over valid UTF-8 doc content.
-        Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(&self.bytes[range]) })
+        Cow::Borrowed(&self.text()[range])
     }
 
     #[inline]

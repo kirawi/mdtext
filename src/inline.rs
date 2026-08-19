@@ -808,7 +808,7 @@ impl<'a, 's> InlineParser<'a, 's> {
 
             // Leading whitespace on paragraphs must be removed.
             while self.ld.pos < self.ld.len && matches!(self.ld.current_unchecked(), b' ' | b'\t') {
-                self.ld.advance(1);
+                self.ld.pos += 1;
             }
 
             // This is deferred to here so that pending_text_start gets updated correctly
@@ -882,12 +882,12 @@ impl<'a, 's> InlineParser<'a, 's> {
     fn try_parse_code_span(&mut self) {
         let opener_start = self.ld.pos;
         let mut tick_count = 1; // consume `` ` `` from entry
-        self.ld.advance(1);
+        self.ld.pos += 1;
 
         // Get the run length
         while self.ld.current() == Some(b'`') {
             tick_count += 1;
-            self.ld.advance(1);
+            self.ld.pos += 1;
         }
         let content_start = self.ld.pos;
 
@@ -1009,7 +1009,7 @@ impl<'a, 's> InlineParser<'a, 's> {
                 if closer != content_start {
                     // GitHub does not treat \`$ as a valid closer, and it forbids subsequent matches.
                     if is_escaped_location(&self.ld, closer) {
-                        self.ld.advance(1);
+                        self.ld.pos += 1;
                         return;
                     }
 
@@ -1119,11 +1119,11 @@ impl<'a, 's> InlineParser<'a, 's> {
     // TODO: Could add a Inline::MaybeEmphasis variant to track counts rather than use text... but am lazy
     fn scan_emphasis_run(&mut self) {
         let delim = self.ld.current_unchecked();
-        self.ld.advance(1);
+        self.ld.pos += 1;
 
         let mut count = 1;
         while self.ld.current() == Some(delim) {
-            self.ld.advance(1);
+            self.ld.pos += 1;
             count += 1;
         }
 
@@ -1169,7 +1169,7 @@ impl<'a, 's> InlineParser<'a, 's> {
         self.flush_text();
 
         let label = if image { "![" } else { "[" };
-        self.ld.advance(label.len()); // consume
+        self.ld.pos += label.len(); // consume
 
         let node = self.push_cowstr_node(label.into(), InlineData::Text);
         self.bracket_stack.push(self.delim_stack.len());
@@ -1191,7 +1191,7 @@ impl<'a, 's> InlineParser<'a, 's> {
         // TODO: maybe figure out more optimal link closing strategy idk; experimented a lot though and
         // not easy! not worth?
         self.flush_text();
-        self.ld.advance(1);
+        self.ld.pos += 1;
 
         let Some(opener_stack_pos) = self.bracket_stack.pop() else {
             // No opener, so treat as literal
@@ -1456,7 +1456,7 @@ impl<'a, 's> InlineParser<'a, 's> {
         }
 
         // It's a literal.
-        self.ld.seek(start + 1);
+        self.ld.pos = start + 1;
     }
 
     fn try_parse_raw_html(&self) -> Option<(Cow<'a, str>, Location)> {
@@ -1699,7 +1699,7 @@ impl<'a, 's> InlineParser<'a, 's> {
                                 // Get URI content
                                 let content = self.ld.borrow(base..base + pos); // +1 to skip <
                                 self.flush_text();
-                                self.ld.advance(pos + 2); // +1 for <, +1 for >
+                                self.ld.pos += pos + 2; // +1 for <, +1 for >
                                 self.push_link(content.clone(), None, content);
                                 return true;
                             }
@@ -1811,14 +1811,14 @@ impl<'a, 's> InlineParser<'a, 's> {
         match try_parse_entity_ref(bytes) {
             EntityParse::Valid { decoded, consumed } => {
                 self.flush_text();
-                self.ld.advance(consumed);
+                self.ld.pos += consumed;
                 self.push_cowstr_node(decoded, InlineData::Text);
             }
             EntityParse::Invalid { consumed, rescan } => {
                 if rescan && self.options.contains(Options::EXTENDED_AUTOLINKS) {
-                    self.ld.advance(1);
+                    self.ld.pos += 1;
                 } else {
-                    self.ld.advance(consumed);
+                    self.ld.pos += consumed;
                 }
             }
         }

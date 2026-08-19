@@ -32,17 +32,52 @@ pub fn normalize_html(source: &str) -> Vec<HtmlNode> {
 
 fn normalize_children(parent: &Handle) -> Vec<HtmlNode> {
     let children = parent.children.borrow();
-    children
+    let parent_is_list_item = matches!(
+        &parent.data,
+        NodeData::Element { name, .. } if name.local.as_ref() == "li"
+    );
+    let mut normalized: Vec<_> = children
         .iter()
         .enumerate()
-        .filter_map(|(index, child)| {
+        .flat_map(|(index, child)| {
             if is_ignorable_inter_element_whitespace(&children, index) {
-                None
+                Vec::new()
+            } else if parent_is_list_item && is_element(child, "p") {
+                // Tight-list renderers omit paragraph tags directly inside
+                // list items, while loose-list renderers retain them. Flatten
+                // those wrappers so both representations normalize equally.
+                normalize_children(child)
             } else {
-                normalize_node(child)
+                normalize_node(child).into_iter().collect()
             }
         })
-        .collect()
+        .collect();
+
+    if parent_is_list_item {
+        for index in 0..normalized.len() {
+            let follows_block = index > 0 && is_normalized_block_element(&normalized[index - 1]);
+            let precedes_block = normalized
+                .get(index + 1)
+                .is_some_and(is_normalized_block_element);
+            if let HtmlNode::Text(text) = &mut normalized[index] {
+                if follows_block {
+                    *text = text.trim_start().to_owned();
+                }
+                if precedes_block {
+                    text.truncate(text.trim_end().len());
+                }
+            }
+        }
+    }
+
+    normalized
+}
+
+fn is_element(node: &Handle, expected: &str) -> bool {
+    matches!(
+        &node.data,
+        NodeData::Element { name, .. } if name.local.as_ref() == expected
+    )
 }
 
 fn normalize_node(node: &Handle) -> Option<HtmlNode> {
@@ -133,8 +168,19 @@ fn is_block_element(node: &Handle) -> bool {
     let NodeData::Element { name, .. } = &node.data else {
         return false;
     };
+    is_block_name(name.local.as_ref())
+}
+
+fn is_normalized_block_element(node: &HtmlNode) -> bool {
+    let HtmlNode::Element { name, .. } = node else {
+        return false;
+    };
+    is_block_name(name.rsplit('|').next().unwrap_or(name))
+}
+
+fn is_block_name(name: &str) -> bool {
     matches!(
-        name.local.as_ref(),
+        name,
         "address"
             | "article"
             | "aside"
@@ -511,6 +557,26 @@ mod tests {
                 "<table><tr><td style=\"color: red; text-align: right\">a</td></tr></table>"
             ),
             normalize_html("<table><tr><td align=right>a</td></tr></table>")
+        );
+    }
+
+    #[test]
+    fn tight_and_loose_list_paragraphs_are_equivalent() {
+        let tight = normalize_html(
+            "<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>three</li>\n</ul>\n</li>\n</ul>",
+        );
+        let loose = normalize_html(
+            "<ul>\n<li>\n<p>one</p>\n</li>\n<li>\n<p>two</p>\n<ul>\n<li>\n<p>three</p>\n</li>\n</ul>\n</li>\n</ul>",
+        );
+
+        assert_eq!(tight, loose);
+    }
+
+    #[test]
+    fn paragraphs_nested_below_list_item_blocks_are_preserved() {
+        assert_ne!(
+            normalize_html("<ul><li><blockquote><p>one</p></blockquote></li></ul>"),
+            normalize_html("<ul><li><blockquote>one</blockquote></li></ul>")
         );
     }
 }
