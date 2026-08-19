@@ -9,7 +9,7 @@ mod common;
 
 use common::normalize_html;
 
-const SPEC: &str = include_str!("../spec.txt");
+const SPEC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/third_party/spec.txt"));
 const EXAMPLE_FENCE: &str = "````````````````````````````````";
 
 #[derive(Debug)]
@@ -82,6 +82,8 @@ const BY_DESIGN_EXCLUDED: &[usize] = &[
 #[test]
 fn commonmark_spec_examples_render_expected_html() {
     let examples = spec_examples();
+
+    // Needed because excluded list would be stale otherwise
     assert_eq!(
         examples.len(),
         655,

@@ -35,6 +35,6 @@ While the library itself is human-written, note that the following were almost o
 
 There may be bugs with them. They exist purely for demonstrative purposes and may receive a human look-over at a later date, but my current priority is to work on the projects that depended on this library being made. AI-generated code will eventually be removed from this repository.
 
-Tests from pulldown-cmark will also be added in the future for further proof of correctness. Unofficially, however, I've fuzzed the parser on a private ~200k human-written/synthetic documents corpus against cmark-gfm and found 100% equivalence. This level of fuzzing will be introduced at a later date using a publicly available dataset (e.g. huggingface, kaggle).
+I've fuzzed the parser on a private ~200k human-written/synthetic documents corpus against cmark-gfm and found 100% equivalence. This level of fuzzing will be introduced at a later date using a publicly available dataset (e.g. huggingface, kaggle).
 
 Please check out the demo at https://kirawi.github.io/mdtext/
