@@ -236,8 +236,7 @@ impl<'a, 's> Ld<'a, 's> {
         self.text()[start..end].chars().next()
     }
 
-    /// Move to the preceding byte of logical content. At a span boundary this
-    /// jumps to the prior span instead of entering a stripped prefix gap.
+    // Move a location to the previous byte (moving across lines if necessary).
     #[inline]
     pub fn prev_by_location(&self, location: &mut Location) -> bool {
         let span = &self.spans[location.span_idx];
@@ -267,8 +266,7 @@ impl<'a, 's> Ld<'a, 's> {
         unsafe { self.spans.get_unchecked(span_idx) }
     }
 
-    /// Advance by one byte of logical paragraph content, jumping over any
-    /// stripped prefix gap. Returns false after moving to the terminal end.
+    // Move a location to the next byte (moving across lines if necessary).
     #[inline]
     pub fn advance_location(&self, location: &mut Location) -> bool {
         let span = self.get_span_unchecked(location.span_idx);
@@ -323,7 +321,7 @@ impl<'a, 's> Ld<'a, 's> {
         None
     }
 
-    /// Test a byte string against logical content at `location`.
+    // Equivalent of str::starts_with
     pub fn starts_with_at_location(&self, mut location: Location, pattern: &[u8]) -> bool {
         for &expected in pattern {
             if self.byte_at_location(location) != Some(expected) {
@@ -334,7 +332,7 @@ impl<'a, 's> Ld<'a, 's> {
         true
     }
 
-    /// Find a byte string without inspecting stripped prefix gaps.
+    // Equivalent of str::find
     pub fn find_subslice_from_location(
         &self,
         pattern: &[u8],
