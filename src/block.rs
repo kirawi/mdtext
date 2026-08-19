@@ -2341,9 +2341,9 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
     }
 
     fn emit_fenced_code(&mut self, info: Span, content: ContentLines) {
-        // SAFETY: always come from valid str
+        // SAFETY: self.buf always comes from `s` in `feed()` thus is always valid UTF-8
         let mut info_str = crate::inline::unescape_string(unsafe {
-            std::str::from_utf8_unchecked(&self.buf[info])
+            &std::str::from_utf8_unchecked(&self.buf)[info]
         });
 
         // TODO: need to abstract this since it comes up twice?
@@ -2426,8 +2426,8 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
         };
 
         for sp in content {
-            // SAFETY: spans are constructed as valid ranges to begin with
-            let text = unsafe { std::str::from_utf8_unchecked(&self.buf[sp]) };
+            // SAFETY: `buf` is the &str content passed in from `feed()` so it's always valid UTF-8.
+            let text = unsafe { &std::str::from_utf8_unchecked(&self.buf)[sp] };
             let text = if may_have_nul {
                 cow_nul(text)
             } else {
@@ -2556,9 +2556,9 @@ fn content_lines_may_have_nul(buf: &[u8], lines: &ContentLines) -> bool {
 
 /// Applies any leading whitespace or NUL handling to the string so that it's ready to be emitted
 fn content_line_to_cow<'a>(buf: &'a [u8], line: ContentLine, may_have_nul: bool) -> Cow<'a, str> {
-    // SAFETY: `buf` always comes from a valid str.
+    // SAFETY: `buf` always comes from the valid str passed to `feed()`.
     // TODO: maybe switch parser tyoe from u8 to str slice to reduce unsafe?
-    let text = unsafe { std::str::from_utf8_unchecked(&buf[line.span]) };
+    let text = unsafe { &std::str::from_utf8_unchecked(&buf)[line.span] };
 
     if line.leading_virt_spaces == 0 {
         if may_have_nul {

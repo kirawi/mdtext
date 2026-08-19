@@ -543,8 +543,7 @@ impl<'p, 'a> Iterator for InnerEventIterator<'p, 'a> {
                         return None;
                     }
 
-                    // SAFETY: already bounds checked above (LLVM didn't eliminate this on my computer as of commit date)
-                    if unsafe { self.buf.get_unchecked(line_end + 1) } == &b'\n' {
+                    if self.buf.get(line_end + 1) == Some(&b'\n') {
                         next_line_start += 1;
                     }
                 }

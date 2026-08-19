@@ -970,9 +970,7 @@ impl<'a, 's> InlineParser<'a, 's> {
                     self.ld.pos += 1;
                 }
 
-                // SAFETY: stopped at ASCII byte, slice is valid UTF-8.
-                let segment =
-                    unsafe { std::str::from_utf8_unchecked(&self.ld.buf()[start..self.ld.pos]) };
+                let segment = &self.ld.text()[start..self.ld.pos];
                 let code = self.alloc_cowstr(Cow::Borrowed(segment));
                 self.forest.append(InlineData::Code(code));
             }
