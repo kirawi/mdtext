@@ -8,15 +8,41 @@ self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
 
 function closeStream(id, state) {
-    if (state.controller) {
+    if (!state.controller) {
+        state.closed = true;
+        return;
+    }
+
+    try {
         state.controller.enqueue(encoder.encode(DOCUMENT_END));
         state.controller.close();
-    } else {
-        state.closed = true;
+        state.port.postMessage({
+            type: 'ack',
+            sequence: state.closeSequence,
+        });
+    } catch (error) {
+        reportStreamError(state, error);
+    } finally {
+        finishStream(id, state);
     }
-    if (state.controller) {
-        state.port.close();
-        if (streams.get(id) === state) streams.delete(id);
+}
+
+function finishStream(id, state) {
+    if (state.finished) return;
+    state.finished = true;
+    state.resolveLifetime();
+    state.port.close();
+    if (streams.get(id) === state) streams.delete(id);
+}
+
+function reportStreamError(state, error) {
+    try {
+        state.port.postMessage({
+            type: 'error',
+            message: error?.message || 'preview stream failed',
+        });
+    } catch {
+        // The page-side port may already be gone.
     }
 }
 
@@ -32,27 +58,52 @@ function cancelStream(id, state) {
             // navigation.
         }
     }
-    state.port.close();
-    if (streams.get(id) === state) streams.delete(id);
+    finishStream(id, state);
 }
 
 self.addEventListener('message', event => {
     if (event.data?.type !== 'create-stream' || !event.ports[0]) return;
 
     const id = String(event.data.id);
+    let resolveLifetime;
+    const lifetime = new Promise(resolve => {
+        resolveLifetime = resolve;
+    });
     const state = {
         port: event.ports[0],
         controller: null,
         chunks: [],
         closed: false,
+        closeSequence: null,
+        finished: false,
+        lifetime,
+        resolveLifetime,
     };
+
+    // MessagePort traffic does not create new extendable service-worker
+    // events. Keep this initial event alive so the browser cannot terminate
+    // the worker while it owns an unfinished preview response.
+    event.waitUntil(lifetime);
+
+    const previous = streams.get(id);
+    if (previous) cancelStream(id, previous);
 
     state.port.onmessage = message => {
         if (message.data?.type === 'chunk') {
-            const bytes = encoder.encode(message.data.html);
-            if (state.controller) state.controller.enqueue(bytes);
-            else state.chunks.push(bytes);
+            try {
+                const bytes = encoder.encode(message.data.html);
+                if (state.controller) state.controller.enqueue(bytes);
+                else state.chunks.push(bytes);
+                state.port.postMessage({
+                    type: 'ack',
+                    sequence: message.data.sequence,
+                });
+            } catch (error) {
+                reportStreamError(state, error);
+                cancelStream(id, state);
+            }
         } else if (message.data?.type === 'close') {
+            state.closeSequence = message.data.sequence;
             closeStream(id, state);
         } else if (message.data?.type === 'cancel') {
             cancelStream(id, state);
@@ -87,8 +138,7 @@ self.addEventListener('fetch', event => {
             if (state.closed) closeStream(id, state);
         },
         cancel() {
-            state.port.close();
-            if (streams.get(id) === state) streams.delete(id);
+            finishStream(id, state);
         },
     });
 

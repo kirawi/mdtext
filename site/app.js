@@ -30,6 +30,7 @@ let observedFrameDocument = null;
 let frameObserver = null;
 
 const RESUME_THRESHOLD = 96;
+const DELIVERY_TIMEOUT = 5000;
 const MATH_COMPLETE_MARKER = '<!--mdtext-math-complete-->';
 const CODE_COMPLETE_MARKER = '<!--mdtext-code-complete-->';
 
@@ -50,7 +51,7 @@ function waitForActivation(worker) {
 }
 
 async function registerPreviewWorker() {
-    const registration = await navigator.serviceWorker.register('./preview-worker.js?v=streams-4', {
+    const registration = await navigator.serviceWorker.register('./preview-worker.js?v=streams-5', {
         scope: './',
         updateViaCache: 'none',
     });
@@ -271,6 +272,45 @@ function readUpdate(update) {
     return value;
 }
 
+function failOutputStream(output, error) {
+    if (output.failure) return;
+    output.failure = error;
+    for (const pending of output.pending.values()) {
+        window.clearTimeout(pending.timeout);
+        pending.reject(error);
+    }
+    output.pending.clear();
+}
+
+function sendOutputMessage(output, message) {
+    if (output.failure) return Promise.reject(output.failure);
+    const sequence = output.nextSequence++;
+    return new Promise((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+            output.pending.delete(sequence);
+            const error = new Error('preview connection lost (delivery was not acknowledged)');
+            failOutputStream(output, error);
+            reject(error);
+        }, DELIVERY_TIMEOUT);
+        output.pending.set(sequence, {
+            resolve,
+            reject,
+            timeout,
+        });
+        try {
+            output.port.postMessage({
+                ...message,
+                sequence,
+            });
+        } catch (error) {
+            window.clearTimeout(timeout);
+            output.pending.delete(sequence);
+            failOutputStream(output, error);
+            reject(error);
+        }
+    });
+}
+
 function formatDuration(milliseconds) {
     if (milliseconds < 0.1) return '<0.1 ms';
     if (milliseconds < 10) return `${milliseconds.toFixed(2)} ms`;
@@ -306,11 +346,11 @@ async function renderInstantly(markdown) {
         const rendered = renderMarkdown(markdown, options);
         const duration = performance.now() - started;
         const html = markCompletedOutput(rendered);
-        if (html) output.postMessage({
+        if (html) await sendOutputMessage(output, {
             type: 'chunk',
             html
         });
-        closeOutputStream(output, current, 'close');
+        await closeOutputStream(output, current, 'close');
         inputSignal.classList.remove('active');
         outputSignal.classList.remove('active');
         inputStatus.textContent = 'input complete';
@@ -339,9 +379,10 @@ async function createOutputStream(id) {
         // cancel the old stream so it cannot remain in the worker's stream map
         // after this render supersedes it.
         try {
-            activeOutput.postMessage({
+            activeOutput.port.postMessage({
                 type: 'cancel'
             });
+            failOutputStream(activeOutput, new DOMException('Render superseded', 'AbortError'));
         } catch {
             // The worker may already have closed the port after a completed
             // stream; there is nothing left to clean up in that case.
@@ -352,10 +393,16 @@ async function createOutputStream(id) {
 
     const registration = await workerRegistration;
     const channel = new MessageChannel();
+    const output = {
+        port: channel.port1,
+        nextSequence: 1,
+        pending: new Map(),
+        failure: null,
+    };
     await new Promise((resolve, reject) => {
         const timeout = window.setTimeout(() => {
             try {
-                channel.port1.postMessage({
+                output.port.postMessage({
                     type: 'cancel'
                 });
             } catch {
@@ -363,12 +410,28 @@ async function createOutputStream(id) {
             }
             reject(new Error('Preview stream did not start'));
         }, 3000);
-        channel.port1.onmessage = event => {
-            if (event.data?.type !== 'ready') return;
-            window.clearTimeout(timeout);
-            resolve();
+        output.port.onmessage = event => {
+            if (event.data?.type === 'ready') {
+                window.clearTimeout(timeout);
+                resolve();
+                return;
+            }
+            if (event.data?.type === 'ack') {
+                const pending = output.pending.get(event.data.sequence);
+                if (!pending) return;
+                window.clearTimeout(pending.timeout);
+                output.pending.delete(event.data.sequence);
+                pending.resolve();
+                return;
+            }
+            if (event.data?.type === 'error') {
+                failOutputStream(output, new Error(`preview connection lost: ${event.data.message}`));
+            }
         };
-        channel.port1.start();
+        output.port.onmessageerror = () => {
+            failOutputStream(output, new Error('preview connection lost (invalid worker message)'));
+        };
+        output.port.start();
         registration.active.postMessage({
             type: 'create-stream',
             id
@@ -382,17 +445,25 @@ async function createOutputStream(id) {
     observedFrameDocument = null;
     preview.src = `./preview-stream?id=${encodeURIComponent(id)}`;
     window.requestAnimationFrame(() => monitorFrame(id));
-    activeOutput = channel.port1;
+    activeOutput = output;
     activeOutputId = id;
-    return channel.port1;
+    return output;
 }
 
 function closeOutputStream(output, id, messageType) {
     if (!output) return;
+    let delivery = Promise.resolve();
     try {
-        output.postMessage({
-            type: messageType
-        });
+        if (messageType === 'close') {
+            delivery = sendOutputMessage(output, {
+                type: messageType
+            });
+        } else {
+            output.port.postMessage({
+                type: messageType
+            });
+            failOutputStream(output, new DOMException('Render cancelled', 'AbortError'));
+        }
     } catch {
         // The worker can close its side immediately after receiving `close`.
     }
@@ -402,6 +473,7 @@ function closeOutputStream(output, id, messageType) {
         activeOutput = null;
         activeOutputId = null;
     }
+    return delivery;
 }
 
 async function streamDocument(markdown, {
@@ -454,7 +526,7 @@ async function streamDocument(markdown, {
             const update = readUpdate(renderer.push(chunk));
 
             if (update.html) {
-                output.postMessage({
+                await sendOutputMessage(output, {
                     type: 'chunk',
                     html: update.html
                 });
@@ -475,12 +547,12 @@ async function streamDocument(markdown, {
         }
         const finalUpdate = readUpdate(renderer.finish());
         if (finalUpdate.html) {
-            output.postMessage({
+            await sendOutputMessage(output, {
                 type: 'chunk',
                 html: finalUpdate.html
             });
         }
-        closeOutputStream(output, current, 'close');
+        await closeOutputStream(output, current, 'close');
         revealSource = null;
         inputSignal.classList.remove('active');
         outputSignal.classList.remove('active');
@@ -490,6 +562,7 @@ async function streamDocument(markdown, {
         replay.disabled = false;
     } catch (error) {
         closeOutputStream(output, current, 'cancel');
+        if (current !== generation) return;
         streamComplete = true;
         revealSource = null;
         inputSignal.classList.remove('active');

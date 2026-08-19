@@ -60,9 +60,12 @@ impl NodeId {
             index <= u32::MAX as usize,
             "node count exceeds u32 range only in pathological cases"
         );
-        // SAFETY: `InlineTree::new` reserves index 0 for the sentinel, so every
-        // real node has index > 0; and a single document cannot contain
-        // `u32::MAX` nodes, so the narrowing to `u32` is lossless in practice.
+        // SAFETY: `InlineTree::new()` always reserves index 0 for the root, and this method is only called
+        // when creating a new node at an index (i.e. index >=1). Furthermore, it's almost impossible for
+        // the maximum limit of 2^32 to be exceeded as that requires a single leaf to exceed **96 GiB** of memory.
+        // = 2^32 * 24 (size of Node)
+        // Not impossible, but let's be sane here. No real document in its entirety would ever be that large.
+        // Assets on parse_inline() would stop any leaf >= 96 GiB as well.
         Self(unsafe { NonZeroU32::new_unchecked(index as u32) })
     }
 
@@ -188,9 +191,17 @@ pub fn parse_inline<'a, 's>(
     spans: &'s [Span],
     options: Options,
 ) -> InlineRoot {
+    /// Due to pointer compression, a chunk exceeding 96 GiB *may* exceed the arena.
+    const MAX_FEED_LEN: u64 = 96 * 1024 * 1024 * 1024;
+
     let ld = Ld::new(bytes, spans);
 
     let bytes = &ld.buf()[ld.content_start()..ld.len];
+    assert!(
+        (bytes.len() as u64) < MAX_FEED_LEN,
+        "leaf must be smaller than 96 GiB!"
+    );
+
     let has_nul = if ld.buf().len() >= 16 {
         memchr::memchr(b'\0', bytes).is_some()
     } else {
