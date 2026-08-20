@@ -381,7 +381,7 @@ Connection: close\r\n\r\n",
         // to the browser instead of arriving in a single burst.  Each line of
         // the request body is fed to the parser after a short delay, exercising
         // the real streaming feed path rather than buffering the document.
-        const STREAM_DELAY: Duration = Duration::from_millis(0);
+        const STREAM_DELAY: Duration = Duration::from_millis(10);
 
         let mut renderer = HtmlWriter::with_options(options);
         let mut parser = Parser::with_options(options);

@@ -123,7 +123,7 @@ pub fn render(markdown: &str, options_bits: u32) -> String {
 /// Return the bitset for all GitHub-flavored Markdown extensions.
 #[wasm_bindgen(js_name = gfmOptions)]
 pub fn gfm_options() -> u32 {
-    Options::GFM.bits()
+    (Options::GFM | Options::SKIP_ROOT_DEFERRED).bits()
 }
 
 /// Return the bitset for all supported math syntaxes.

@@ -142,6 +142,11 @@ impl Options {
     /// CommonMark and GFM diverge in classifying emphasis runs due to differing definitions of
     /// Unicode punctuation and how emphasis runs are minimized. This enables the GFM definition.
     pub const GFM_DIALECT: Self = Self(1 << 8);
+    /// Emit top-level fenced code and HTML blocks line-by-line instead of waiting for their closer
+    /// or the end of the document. This works because none of the lines have to be parsed inline and
+    /// are **not** dependent on future lines -- which is why indented code block can't be added (needs
+    /// lookahead to know whether a blank line closes it or is a continuation).
+    pub const SKIP_ROOT_DEFERRED: Self = Self(1 << 9);
 
     pub const GFM: Self = Self(
         Self::TABLES.0
@@ -461,6 +466,7 @@ impl<'p, 'a> Iterator for InnerEventIterator<'p, 'a> {
                             self.parser.block_parser.parse_line_for_iter(
                                 buf,
                                 pos..end,
+                                pos..buf.len(),
                                 &mut self.actions,
                                 &mut buffered,
                             );
@@ -548,14 +554,14 @@ impl<'p, 'a> Iterator for InnerEventIterator<'p, 'a> {
                     }
                 }
 
-                // Intentionally omits the line endings since they're not useful.
-                // TODO: they are useful so we shouldn't omit them...
                 let line_start = self.parser.line_start;
                 let line = line_start..line_end;
+                let line_with_ending = line_start..next_line_start;
                 let mut buffered = None;
                 self.parser.block_parser.parse_line_for_iter(
                     self.buf,
                     line,
+                    line_with_ending,
                     &mut self.actions,
                     &mut buffered,
                 );

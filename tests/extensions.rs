@@ -917,9 +917,9 @@ fn delimiter_only_display_math_is_an_opaque_block() {
         parse(latex, Options::MATH_LATEX),
         vec![
             Event::Start(Tag::DisplayMath),
-            Event::DisplayMath("\\delta(q_{\\mathrm{seek}}(C,e),\\epsilon,[O,b,S])\n".into(),),
-            Event::DisplayMath("=\n".into()),
-            Event::DisplayMath("(q_{\\mathrm{seek}}(C,e),\\epsilon).\n".into()),
+            Event::DisplayMath(
+                "\\delta(q_{\\mathrm{seek}}(C,e),\\epsilon,[O,b,S])\n=\n(q_{\\mathrm{seek}}(C,e),\\epsilon).\n".into(),
+            ),
             Event::End,
         ]
     );
@@ -928,9 +928,7 @@ fn delimiter_only_display_math_is_an_opaque_block() {
         parse("$$\nx\n=\ny\n$$\n", Options::MATH_DOLLARS),
         vec![
             Event::Start(Tag::DisplayMath),
-            Event::DisplayMath("x\n".into()),
-            Event::DisplayMath("=\n".into()),
-            Event::DisplayMath("y\n".into()),
+            Event::DisplayMath("x\n=\ny\n".into()),
             Event::End,
         ]
     );
@@ -950,23 +948,12 @@ fn display_math_blocks_shield_markdown_block_starts() {
         "--- | ---\n",
     );
     let source = format!("\\[\n{body}\\]\n");
-    let res = [
-        "=\n",
-        "---\n",
-        "# heading-like TeX\n",
-        "> quote-like TeX\n",
-        "- list-like TeX\n",
-        "```not-a-fence\n",
-        "<script>not HTML</script>\n",
-        "a | b\n",
-        "--- | ---\n",
-    ]
-    .map(|content| Event::DisplayMath(content.into()));
     let parse = parse(&source, Options::GFM | Options::MATH_LATEX);
-    let expected = std::iter::once(Event::Start(Tag::DisplayMath))
-        .chain(res)
-        .chain(std::iter::once(Event::End))
-        .collect::<Vec<_>>();
+    let expected = vec![
+        Event::Start(Tag::DisplayMath),
+        Event::DisplayMath(body.into()),
+        Event::End,
+    ];
     assert_eq!(parse, expected);
 }
 

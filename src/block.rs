@@ -30,19 +30,37 @@ impl BlockParser {
 
     /// `line`: a `[start, end)` range representing line content w/o the line ending.
     ///         An exclusive end bound is necessary to represent empty lines (`\r`, `\n`, `\r\n`).
+    /// `line_with_ending`: the same range extended through its complete line ending, if present.
     pub fn parse_line_for_iter<'a>(
         &mut self,
         buf: &'a [u8],
         line: Span,
+        line_with_ending: Span,
         actions: &mut VecDeque<Action<'a>>,
         active: &mut Option<BufferedLeafEvents<'a>>,
     ) {
-        if self.continue_top_level_literal(buf, &line) {
+        let line_with_ending = &buf[line_with_ending];
+        if self.containers.is_empty()
+            && self.leaf_is_open()
+            && self.handle_root_literals_fast_path(
+                buf,
+                line_with_ending,
+                line.start,
+                line.end - line.start,
+                actions,
+                active,
+            )
+        {
+            // Cheaply deferred literal text is only possible when we are at root level (i.e. no containers). This
+            // is because the premise of this fast-path optimization (that these leafs can be output line-by-line,
+            // skipping `Scanner`) would no longer hold.
             return;
         }
+
         let bytes = &buf[line.clone()];
         let mut scanner = Scanner {
             bytes,
+            full_line: line_with_ending,
             buf,
             line_offset: line.start,
             options: self.options,
@@ -52,73 +70,233 @@ impl BlockParser {
             containers: &mut self.containers,
             inline_parser: &mut self.inline_parser,
             actions,
-            deferred: Some(DeferredOutput { active }),
+            buffered: active,
         };
         scanner.parse_line();
     }
 
-    fn continue_top_level_literal(&mut self, buf: &[u8], line: &Span) -> bool {
-        if !self.containers.is_empty() {
-            return false;
-        }
-        let indent = match self.leaf.as_ref() {
-            Some(Leaf::FencedCode { indent, .. } | Leaf::Math { indent, .. }) => *indent as u16,
-            _ => return false,
-        };
+    /// Returns `true` if the line was fully handled. `false` means that the line was not *fully* parsed and that
+    /// the `Scanner` must process what's left.
+    fn handle_root_literals_fast_path<'a>(
+        &mut self,
+        buf: &'a [u8],
+        line: &'a [u8],
+        line_offset: usize,
+        content_len: usize,
+        actions: &mut VecDeque<Action<'a>>,
+        active: &mut Option<BufferedLeafEvents<'a>>,
+    ) -> bool {
+        let bytes = &line[..content_len];
+        let leaf = self.leaf.as_mut().unwrap();
+        let mut saw_closer = false;
 
-        let bytes = &buf[line.clone()];
-        let mut cursor = BlockCursor::new(bytes);
-        cursor.consume_many_space(3);
-        if cursor.pending <= 3 && cursor.pos < bytes.len() {
-            let closes = match self.leaf.as_ref() {
-                Some(Leaf::FencedCode { delim, len, .. }) if bytes[cursor.pos] == *delim => {
+        // Whether lines get emitted as events right away or not. It drastically improves latency at the cost
+        // of the parser possibly being a little bit slower from mutating the events queue more often.
+        let skip_deferred = self.options.contains(Options::SKIP_ROOT_DEFERRED);
+
+        // The line may be emitted verbatim IFF the line does not fulfill the closing condition for the
+        // respective leaf.
+        let handled = match leaf {
+            Leaf::FencedCode {
+                delim,
+                len,
+                indent,
+                info: _,
+                content,
+                is_math,
+            } => {
+                // First, we need to check whether this is a closing fence. Closing fences can be preceded by
+                // up to three spaces of indentationm.
+                let mut cursor = BlockCursor::new(bytes);
+                cursor.consume_many_space(3);
+
+                if cursor.pending <= 3 && cursor.pos < bytes.len() && bytes[cursor.pos] == *delim {
                     let start = cursor.pos;
-                    let mut p = start;
-                    while p < bytes.len() && bytes[p] == *delim {
-                        p += 1;
+
+                    // Count the number of delimiters there are for the code fence. For it to be a closer,
+                    // it *must* be >= `len` with **no** other non-whitespace character appearing on the line.
+                    let mut end = start;
+                    while end < bytes.len() && bytes[end] == *delim {
+                        end += 1;
                     }
-                    let mut tail = p;
-                    while tail < bytes.len() && is_ws(bytes[tail]) {
-                        tail += 1;
+
+                    if end - start >= *len as usize && bytes[end..].iter().all(|&b| is_ws(b)) {
+                        saw_closer = true;
                     }
-                    p - start >= *len as usize && tail == bytes.len()
                 }
-                Some(Leaf::Math { kind, .. }) if cursor.pos + 1 < bytes.len() => {
+
+                if !saw_closer {
+                    // Strip leading indentation from the content line, preserving any surplus.
+                    let mut cursor = BlockCursor::new(bytes);
+                    cursor.consume_many_space(*indent as u16);
+
+                    let surplus = cursor.pending.saturating_sub(*indent as u16);
+                    if skip_deferred {
+                        let content_line = ContentLine::new(surplus, cursor.pos..line.len());
+                        let content = content_line_to_cow(
+                            line,
+                            content_line,
+                            bytes_has_nul(&line[cursor.pos..]),
+                        );
+                        let event = if *is_math {
+                            Event::DisplayMath(content)
+                        } else {
+                            Event::Code(content)
+                        };
+                        actions.push_back(Action::Event(event));
+                    } else {
+                        content.push_contiguous(ContentLine::new(
+                            surplus,
+                            line_offset + cursor.pos..line_offset + line.len(),
+                        ));
+                    }
+                }
+                true
+            }
+            Leaf::Math {
+                kind,
+                indent,
+                content,
+            } => {
+                // The same rules as for code fences.
+                let mut cursor = BlockCursor::new(bytes);
+                cursor.consume_many_space(3);
+
+                if cursor.pending <= 3 && cursor.pos + 1 < bytes.len() {
                     let marker = &bytes[cursor.pos..cursor.pos + 2];
-                    let closer = match kind {
+                    saw_closer = match kind {
                         DisplayMathKind::Dollars => marker == b"$$",
                         DisplayMathKind::Latex => marker == b"\\]",
-                    };
-                    closer && bytes[cursor.pos + 2..].iter().all(|&b| is_ws(b))
+                    } && bytes[cursor.pos + 2..].iter().all(|&b| is_ws(b));
                 }
-                _ => false,
-            };
-            if closes {
-                return false;
+
+                if saw_closer {
+                    true
+                } else {
+                    let mut cursor = BlockCursor::new(bytes);
+                    cursor.consume_many_space(*indent as u16);
+
+                    let surplus = cursor.pending.saturating_sub(*indent as u16);
+                    if skip_deferred {
+                        let content_line = ContentLine::new(surplus, cursor.pos..line.len());
+                        let content = content_line_to_cow(
+                            line,
+                            content_line,
+                            bytes_has_nul(&line[cursor.pos..]),
+                        );
+                        actions.push_back(Action::Event(Event::DisplayMath(content)));
+                    } else {
+                        content.push_contiguous(ContentLine::new(
+                            surplus,
+                            line_offset + cursor.pos..line_offset + line.len(),
+                        ));
+                    }
+                    true
+                }
             }
+            Leaf::Html { kind, content } => {
+                if kind.is_terminated_by(bytes) {
+                    saw_closer = true;
+                } else if skip_deferred {
+                    // SAFETY: `line` is a subslice of the UTF-8 input passed to `Parser::feed`.
+                    let text = unsafe { std::str::from_utf8_unchecked(line) };
+                    let text = if bytes_has_nul(line) {
+                        cow_nul(text)
+                    } else {
+                        Cow::Borrowed(text)
+                    };
+                    actions.push_back(Action::Event(Event::Html(text)));
+                } else {
+                    // TODO: make contiguous in the future.
+                    content.push(line_offset..line_offset + line.len());
+                }
+                true
+            }
+            _ => false,
+        };
+
+        if !saw_closer {
+            return handled;
         }
 
-        cursor = BlockCursor::new(bytes);
-        cursor.consume_many_space(indent);
-        let surplus = cursor.pending.saturating_sub(indent);
-        let start = line.start + cursor.pos;
-        let mut end = line.end;
-        if end < buf.len() && matches!(buf[end], b'\n' | b'\r') {
-            end += 1;
-        }
-        match self.leaf.as_mut() {
-            Some(Leaf::FencedCode { content, .. }) => {
-                if surplus == 0 {
-                    content.push_run(start..end);
+        // Emit close events!
+        match self.leaf.take().unwrap() {
+            Leaf::FencedCode {
+                info,
+                content,
+                is_math,
+                ..
+            } => {
+                if skip_deferred {
+                    // CRITICAL: by this point, the opening line with `info` is no longer available (i.e. consumed)
+                    // and the opener event has already been emitted.
+                    actions.push_back(Action::Event(Event::End));
+                    return true;
+                }
+
+                let (tag, kind) = if is_math {
+                    (Tag::DisplayMath, BufferedLeafKind::DisplayMath)
                 } else {
-                    content.push(ContentLine::new(surplus, start..end));
+                    let tag = create_fenced_code_tag(buf, info);
+                    (tag, BufferedLeafKind::Code)
+                };
+                *active = Some(BufferedLeafEvents::new(buf, tag, content, kind));
+            }
+            Leaf::Math { content, .. } => {
+                if skip_deferred {
+                    actions.push_back(Action::Event(Event::End));
+                } else {
+                    *active = Some(BufferedLeafEvents::new(
+                        buf,
+                        Tag::DisplayMath,
+                        content,
+                        BufferedLeafKind::DisplayMath,
+                    ));
                 }
             }
-            Some(Leaf::Math { content, .. }) => {
-                content.push(ContentLine::new(surplus, start..end));
+            Leaf::Html { kind, mut content } => {
+                if !matches!(kind, HtmlKind::BlockTag | HtmlKind::CompleteTag) {
+                    // We also need to include the closing line in the output unless it's type 6/7 where
+                    // their end conditions (blank lines) shouldn't be in the output.
+                    if skip_deferred {
+                        // SAFETY: `line` is a subslice of the UTF-8 input passed to `Parser::feed`.
+                        let text = unsafe { std::str::from_utf8_unchecked(line) };
+                        let text = if bytes_has_nul(line) {
+                            cow_nul(text)
+                        } else {
+                            Cow::Borrowed(text)
+                        };
+                        actions.push_back(Action::Event(Event::Html(text)));
+                    } else {
+                        content.push(line_offset..line_offset + line.len());
+                    }
+                }
+
+                if skip_deferred {
+                    actions.push_back(Action::Event(Event::End));
+                } else {
+                    actions.reserve(content.len() + 2);
+                    actions.push_back(Action::Event(Event::Start(Tag::HtmlBlock)));
+                    let may_have_nul = match (content.first(), content.last()) {
+                        (Some(first), Some(last)) => bytes_has_nul(&buf[first.start..last.end]),
+                        _ => false,
+                    };
+                    for span in content {
+                        // SAFETY: `buf` is the UTF-8 input passed to `Parser::feed`.
+                        let text = unsafe { &std::str::from_utf8_unchecked(buf)[span] };
+                        let text = if may_have_nul {
+                            cow_nul(text)
+                        } else {
+                            Cow::Borrowed(text)
+                        };
+                        actions.push_back(Action::Event(Event::Html(text)));
+                    }
+                    actions.push_back(Action::Event(Event::End));
+                }
             }
-            _ => unreachable!("the opaque leaf was inspected above"),
+            _ => unreachable!(),
         }
+
         true
     }
 
@@ -134,6 +312,10 @@ impl BlockParser {
     // TODO: investigate whether we can do this on event emission to avoid shifting to begin with! Then, spans
     // would have the correct spans from the start. should be easy?
     pub fn update_leaf_spans(&mut self, delta: usize) {
+        let skip_root_deferred =
+            self.options.contains(Options::SKIP_ROOT_DEFERRED) && self.containers.is_empty();
+
+        // TODO: can maybe consolidate spans/contentlines in future? just need fix HTML
         fn shift_spans(spans: &mut SmallVec<[Span; 4]>, delta: usize) {
             for span in spans {
                 span.start -= delta;
@@ -142,27 +324,35 @@ impl BlockParser {
         }
 
         fn shift_content(content: &mut ContentLines, delta: usize) {
-            for segment in &mut content.segments {
-                let span = match segment {
-                    ContentSegment::Line(line) => &mut line.span,
-                    ContentSegment::Run(span) => span,
-                };
-                span.start -= delta;
-                span.end -= delta;
+            for line in &mut content.lines {
+                line.span.start -= delta;
+                line.span.end -= delta;
             }
         }
 
         match self.leaf.as_mut() {
             Some(Leaf::Paragraph(spans, _)) => shift_spans(spans, delta),
             Some(Leaf::FencedCode { info, content, .. }) => {
-                info.start -= delta;
-                info.end -= delta;
+                if !skip_root_deferred {
+                    // These fields are ignored when skipping deferred output
+                    info.start -= delta;
+                    info.end -= delta;
+                    shift_content(content, delta);
+                }
+            }
+            Some(Leaf::IndentedCode(content)) => {
                 shift_content(content, delta);
             }
-            Some(Leaf::IndentedCode(content) | Leaf::Math { content, .. }) => {
+            Some(Leaf::Math { content, .. }) if !skip_root_deferred => {
                 shift_content(content, delta);
             }
-            Some(Leaf::Html { content, .. }) => shift_spans(content, delta),
+            Some(Leaf::Math { .. }) => {}
+            Some(Leaf::Html { content, .. }) => {
+                if !skip_root_deferred {
+                    // This field is ignored when skipping deferred output
+                    shift_spans(content, delta);
+                }
+            }
 
             // Tables don't have any content; they're just a meta-container for table rows where events get
             // emitted immediately for parsed lines.
@@ -178,6 +368,7 @@ impl BlockParser {
     ) {
         let mut scanner = Scanner {
             bytes: &[],
+            full_line: &[],
             buf,
             line_offset: 0,
             cursor: BlockCursor::new(&[]),
@@ -187,7 +378,7 @@ impl BlockParser {
             inline_parser: &mut self.inline_parser,
             options: self.options,
             actions,
-            deferred: Some(DeferredOutput { active }),
+            buffered: active,
         };
         scanner.close_leaf();
         scanner.close_containers(0);
@@ -207,6 +398,24 @@ impl BlockParser {
 enum DisplayMathKind {
     Dollars,
     Latex,
+}
+
+fn create_fenced_code_tag<'a>(buf: &'a [u8], info: Span) -> Tag<'a> {
+    // SAFETY: self.buf always comes from `s` in `feed()` thus is always valid UTF-8
+    let mut info_str =
+        crate::inline::unescape_string(unsafe { &std::str::from_utf8_unchecked(buf)[info] });
+
+    // Must replace NUL per CommonMark specification
+    if bytes_has_nul(info_str.as_bytes()) {
+        info_str = info_str.replace('\0', "\u{FFFD}").into();
+    }
+
+    let tag = if info_str.is_empty() {
+        Tag::CodeBlock(None)
+    } else {
+        Tag::CodeBlock(Some(info_str))
+    };
+    tag
 }
 
 // The `u8`s are delimiters
@@ -243,86 +452,51 @@ struct ContentLine {
     span: Span,
 }
 
-enum ContentSegment {
-    /// One line requiring exact handling, normally because indentation crossed
-    /// a tab stop or a container prefix made the source discontinuous.
-    Line(ContentLine),
-    /// Contiguous ordinary lines. Their boundaries are rediscovered with
-    /// memchr while events are emitted.
-    Run(Span),
-}
-
 struct ContentLines {
-    segments: SmallVec<[ContentSegment; 4]>,
+    lines: SmallVec<[ContentLine; 4]>,
 }
 
 impl ContentLines {
     fn new() -> Self {
         Self {
-            segments: SmallVec::new(),
+            lines: SmallVec::new(),
         }
     }
 
     fn push(&mut self, line: ContentLine) {
-        self.segments.push(ContentSegment::Line(line));
+        self.lines.push(line);
     }
 
-    fn push_run(&mut self, span: Span) {
-        if let Some(ContentSegment::Run(previous)) = self.segments.last_mut()
-            && previous.end == span.start
+    fn push_contiguous(&mut self, line: ContentLine) {
+        if line.leading_virt_spaces == 0
+            && let Some(previous) = self.lines.last_mut()
+            && previous.leading_virt_spaces == 0
+            && previous.span.end == line.span.start
         {
-            previous.end = span.end;
+            previous.span.end = line.span.end;
         } else {
-            self.segments.push(ContentSegment::Run(span));
+            self.lines.push(line);
         }
-    }
-
-    fn len(&self) -> usize {
-        self.segments.len()
     }
 
     fn first(&self) -> Option<&Span> {
-        match self.segments.first()? {
-            ContentSegment::Line(line) => Some(&line.span),
-            ContentSegment::Run(span) => Some(span),
-        }
+        self.lines.first().map(|line| &line.span)
     }
 
     fn last(&self) -> Option<&Span> {
-        match self.segments.last()? {
-            ContentSegment::Line(line) => Some(&line.span),
-            ContentSegment::Run(span) => Some(span),
-        }
+        self.lines.last().map(|line| &line.span)
     }
 
     fn pop(&mut self) -> Option<Span> {
-        let ContentSegment::Line(line) = self.segments.pop()? else {
-            unreachable!("coalesced runs are only used for fenced code")
-        };
-        Some(line.span)
+        self.lines.pop().map(|line| line.span)
     }
 
     fn into_iter(self) -> ContentLineIter {
-        ContentLineIter {
-            segments: self.segments.into_iter(),
-        }
+        self.lines.into_iter()
     }
 }
 
-struct ContentLineIter {
-    segments: smallvec::IntoIter<[ContentSegment; 4]>,
-}
-
-impl Iterator for ContentLineIter {
-    type Item = ContentLine;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.segments.next()? {
-            ContentSegment::Line(line) => Some(line),
-            ContentSegment::Run(run) => Some(ContentLine::new(0, run)),
-        }
-    }
-}
+type ContentLineIter = smallvec::IntoIter<[ContentLine; 4]>;
 
 #[derive(Clone, Copy)]
 enum BufferedLeafKind {
@@ -374,10 +548,6 @@ impl<'a> Iterator for BufferedLeafEvents<'a> {
     }
 }
 
-struct DeferredOutput<'s, 'a> {
-    active: &'s mut Option<BufferedLeafEvents<'a>>,
-}
-
 impl ContentLine {
     fn new(leading_virt_spaces: u16, span: Span) -> Self {
         Self {
@@ -398,6 +568,7 @@ enum Leaf {
         indent: u8, // Always 0-3
         info: Span,
         content: ContentLines,
+        is_math: bool,
     },
     IndentedCode(ContentLines),
     /// `$$ ... $$` or `\[ ... \]`
@@ -522,8 +693,11 @@ pub struct Scanner<'s, 'a: 's> {
     /// Bytes of the entire block that the current line is member to.
     buf: &'a [u8],
 
-    /// Bytes of the line currently being read.
+    /// Content bytes of the line currently being read, excluding its line ending.
     bytes: &'a [u8],
+
+    /// Same as `bytes` but with the line ending (if any) attached.
+    full_line: &'a [u8],
 
     /// The byte offset of `bytes` within `buf`.
     line_offset: usize,
@@ -551,66 +725,22 @@ pub struct Scanner<'s, 'a: 's> {
 
     // Output
     actions: &'s mut VecDeque<Action<'a>>,
-    deferred: Option<DeferredOutput<'s, 'a>>,
+    buffered: &'s mut Option<BufferedLeafEvents<'a>>,
 }
 
 impl<'s, 'a: 's> Scanner<'s, 'a> {
+    fn should_emit_event_immediately(&self) -> bool {
+        self.options.contains(Options::SKIP_ROOT_DEFERRED) && self.containers.is_empty()
+    }
+
     // This more-or-less follows the algorithm provided in the CommonMark specification's apendix.
     pub fn parse_line(&mut self) {
-        if self.containers.is_empty() && self.handle_top_level_fenced_code() {
-            return;
-        }
-
         let matched = self.match_containers();
         if self.handle_leaf(matched) {
             return;
         }
 
         self.open_blocks(matched, None);
-    }
-
-    /// Continue the dominant fenced-code case without moving the large leaf
-    /// state out of `self.leaf` and back for every physical line.
-    fn handle_top_level_fenced_code(&mut self) -> bool {
-        let (delim, fence_len, indent) = match self.leaf.as_ref() {
-            Some(Leaf::FencedCode {
-                delim, len, indent, ..
-            }) => (*delim, *len as usize, *indent),
-            _ => return false,
-        };
-
-        let saved_cursor = self.cursor;
-        self.cursor.consume_many_space(3);
-        if self.cursor.pending <= 3
-            && self.cursor.pos < self.bytes.len()
-            && self.bytes[self.cursor.pos] == delim
-        {
-            let start = self.cursor.pos;
-            let mut p = start;
-            while p < self.bytes.len() && self.bytes[p] == delim {
-                p += 1;
-            }
-            let mut tail = p;
-            while tail < self.bytes.len() && is_ws(self.bytes[tail]) {
-                tail += 1;
-            }
-            if p - start >= fence_len && tail == self.bytes.len() {
-                let Some(Leaf::FencedCode { info, content, .. }) = self.leaf.take() else {
-                    unreachable!("the fenced leaf was inspected above")
-                };
-                self.emit_fenced_code(info, content);
-                return true;
-            }
-        }
-
-        self.cursor = saved_cursor;
-        self.cursor.consume_many_space(indent as u16);
-        let line = self.content_line(indent as u16);
-        let Some(Leaf::FencedCode { content, .. }) = self.leaf.as_mut() else {
-            unreachable!("the fenced leaf was inspected above")
-        };
-        content.push(line);
-        true
     }
 
     /// Iterates through container block markers at the beginning of the line to determine which
@@ -737,7 +867,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                         self.close_containers(matched);
                     }
                     LineStart::Text => {
-                        content.push(self.content_span());
+                        content.push(self.inline_content_span());
                         *self.leaf = Some(Leaf::Paragraph(content, task));
                     }
                     LineStart::Setext(level) => {
@@ -775,6 +905,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 indent,
                 info,
                 mut content,
+                is_math,
             } => {
                 // This contradicts the specification's statement that lazy continuation lines should be
                 // treated as though they were properly indented, but this is `cmark`'s behavior. *shrug*
@@ -789,7 +920,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 // should be `<ul></li><code>hello</code></li></ul>`
                 // but instead it's `<ul><li><code></code></li><p>foo</p><code></code>`
                 if maybe_lazy {
-                    self.emit_fenced_code(info, content);
+                    self.emit_fenced_code(info, content, is_math);
                     return false;
                 }
 
@@ -814,7 +945,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                         tail += 1;
                     }
                     if count >= len && tail >= self.bytes.len() {
-                        self.emit_fenced_code(info, content);
+                        self.emit_fenced_code(info, content, is_math);
                         return true;
                     }
                 }
@@ -830,6 +961,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                     indent,
                     info,
                     content,
+                    is_math,
                 });
                 true
             }
@@ -900,6 +1032,8 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 true
             }
             Leaf::Html { kind, mut content } => {
+                let stream = self.should_emit_event_immediately();
+
                 // Not spec compliant but see context for this behavior in Leaf::FencedCode
                 if maybe_lazy {
                     self.emit_html(content);
@@ -911,13 +1045,27 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 if kind.is_terminated_by(remaining_bytes) {
                     // Types 1–5: include the closing line; types 6–7: a blank line ends the block so don't include.
                     if !matches!(kind, HtmlKind::BlockTag | HtmlKind::CompleteTag) {
-                        content.push(self.content_span());
+                        let span = self.content_span();
+                        if stream {
+                            self.emit_html_line(span);
+                        } else {
+                            content.push(span);
+                        }
                     }
-                    self.emit_html(content);
+                    if stream {
+                        self.actions.push_back(Action::Event(Event::End));
+                    } else {
+                        self.emit_html(content);
+                    }
                     return true;
                 }
 
-                content.push(self.content_span());
+                let span = self.content_span();
+                if stream {
+                    self.emit_html_line(span);
+                } else {
+                    content.push(span);
+                }
                 *self.leaf = Some(Leaf::Html { kind, content });
                 true
             }
@@ -1000,7 +1148,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 // Rows must have at least 1 cell to be part of a table
                 if row_cells == 0 {
                     self.close_table(has_body);
-                    *self.leaf = Some(Leaf::Paragraph(smallvec![self.content_span()], None));
+                    *self.leaf = Some(Leaf::Paragraph(smallvec![self.inline_content_span()], None));
                     return true;
                 }
 
@@ -1009,7 +1157,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 // Short-circuit to avoid DOS (per GitHub)
                 if cells > MAX_AUTOCOMPLETED_CELLS {
                     self.close_table(has_body);
-                    *self.leaf = Some(Leaf::Paragraph(smallvec![self.content_span()], None));
+                    *self.leaf = Some(Leaf::Paragraph(smallvec![self.inline_content_span()], None));
                     return true;
                 }
 
@@ -1072,7 +1220,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                     // list if has marker.
                     let is_first_item_block = self.mark_item_has_child();
 
-                    let spans = smallvec![self.content_span()];
+                    let spans = smallvec![self.inline_content_span()];
                     let task = (is_first_item_block && self.options.contains(Options::TASK_LISTS))
                         .then(|| self.try_task_list_marker(&spans[0]))
                         .flatten();
@@ -1202,16 +1350,37 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 indent,
                 info,
             } => {
+                // SAFETY: self.buf always comes from `s` in `feed()` thus is always valid UTF-8
+                let is_math = self.options.contains(Options::MATH_CODE)
+                    && crate::inline::unescape_string(unsafe {
+                        &std::str::from_utf8_unchecked(self.buf)[info.clone()]
+                    }) == "math";
+
+                // Per GitHub's special math, ```math gets parsed as a display math block.
+                let tag = if is_math {
+                    Tag::DisplayMath
+                } else {
+                    create_fenced_code_tag(self.buf, info.clone())
+                };
+
+                if self.should_emit_event_immediately() {
+                    self.actions.push_back(Action::Event(Event::Start(tag)));
+                }
                 *self.leaf = Some(Leaf::FencedCode {
                     delim,
                     len,
                     indent,
                     info,
                     content: ContentLines::new(),
+                    is_math,
                 });
                 true
             }
             BlockStart::DisplayMath { kind, indent } => {
+                if self.should_emit_event_immediately() {
+                    self.actions
+                        .push_back(Action::Event(Event::Start(Tag::DisplayMath)));
+                }
                 *self.leaf = Some(Leaf::Math {
                     kind,
                     indent,
@@ -1220,9 +1389,26 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 true
             }
             BlockStart::HtmlBlock { kind } => {
-                let mut content = SmallVec::new();
-                content.push(self.content_span());
+                let span = self.content_span();
+                if self.should_emit_event_immediately() {
+                    self.actions
+                        .push_back(Action::Event(Event::Start(Tag::HtmlBlock)));
+                    self.emit_html_line(span);
+                    if !matches!(kind, HtmlKind::BlockTag | HtmlKind::CompleteTag)
+                        && kind.is_terminated_by(&self.bytes[self.content_start..])
+                    {
+                        self.actions.push_back(Action::Event(Event::End));
+                    } else {
+                        *self.leaf = Some(Leaf::Html {
+                            kind,
+                            content: SmallVec::new(),
+                        });
+                    }
+                    return true;
+                }
 
+                let mut content = SmallVec::new();
+                content.push(span);
                 if !matches!(kind, HtmlKind::BlockTag | HtmlKind::CompleteTag)
                     && kind.is_terminated_by(&self.bytes[self.content_start..])
                 {
@@ -1275,19 +1461,17 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
         ContentLine::new(surplus, self.content_span())
     }
 
-    /// Current line's remaining content as a buffer-relative span, extended to
-    /// include the trailing newline (so the inline parser sees line breaks).
-    // FIXME: remove once inline parsing no longer needs to know about newlines
     fn content_span(&self) -> Span {
         let start = self.line_offset + self.cursor.pos;
-        let mut end = self.line_offset + self.bytes.len();
-        // Re-attach one line-terminator byte (LF, or the CR of a CRLF/CR
-        // ending) so the inline parser sees a break. Only the CR is re-attached
-        // for CRLF, avoiding a double break.
-        if end < self.buf.len() && matches!(self.buf[end], b'\n' | b'\r') {
-            end += 1;
+        start..self.line_offset + self.full_line.len()
+    }
+
+    fn inline_content_span(&self) -> Span {
+        let mut span = self.content_span();
+        if self.full_line.ends_with(b"\r\n") {
+            span.end -= 1;
         }
-        start..end
+        span
     }
 
     // -------------------------------------------------------------------------
@@ -2266,7 +2450,12 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
         if let Some(leaf) = self.leaf.take() {
             match leaf {
                 Leaf::Paragraph(spans, task) => self.emit_paragraph(spans, task),
-                Leaf::FencedCode { info, content, .. } => self.emit_fenced_code(info, content),
+                Leaf::FencedCode {
+                    info,
+                    content,
+                    is_math,
+                    ..
+                } => self.emit_fenced_code(info, content, is_math),
                 Leaf::IndentedCode(content) => self.emit_indented_code(content),
                 Leaf::Math { content, .. } => self.emit_display_math(content),
                 Leaf::Html { content, .. } => self.emit_html(content),
@@ -2275,64 +2464,30 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
         }
     }
 
-    /// Materialize one indent-stripped content line. The straddling-tab
-    /// remainder is prepended only on the rare path that needs ownership.
-    fn emit_code_lines(&mut self, lines: ContentLines) {
-        let may_have_nul = content_lines_may_have_nul(self.buf, &lines);
-        for line in lines.into_iter() {
-            let content = content_line_to_cow(self.buf, line, may_have_nul);
-            self.actions.push_back(Action::Event(Event::Code(content)));
-        }
-    }
-
-    fn emit_display_math_lines(&mut self, lines: ContentLines) {
-        let may_have_nul = content_lines_may_have_nul(self.buf, &lines);
-        for line in lines.into_iter() {
-            let content = content_line_to_cow(self.buf, line, may_have_nul);
-            self.actions
-                .push_back(Action::Event(Event::DisplayMath(content)));
-        }
-    }
-
-    fn defer_buffered_leaf(
-        &mut self,
-        tag: Tag<'a>,
-        content: ContentLines,
-        kind: BufferedLeafKind,
-    ) -> Result<(), (Tag<'a>, ContentLines)> {
-        let Some(deferred) = &mut self.deferred else {
-            return Err((tag, content));
-        };
-        if deferred.active.is_some() {
-            return Err((tag, content));
-        }
-        *deferred.active = Some(BufferedLeafEvents::new(self.buf, tag, content, kind));
-        Ok(())
+    fn defer_buffered_leaf(&mut self, tag: Tag<'a>, content: ContentLines, kind: BufferedLeafKind) {
+        debug_assert!(self.buffered.is_none());
+        *self.buffered = Some(BufferedLeafEvents::new(self.buf, tag, content, kind));
     }
 
     fn emit_paragraph(&mut self, mut spans: SmallVec<[Span; 4]>, task: Option<(bool, usize)>) {
         let mut skip_spans = 0;
         if let Some((checked, consumed)) = task {
-            // Strip the marker (and its single trailing whitespace) from the
-            // first content span so the inline parser doesn't re-emit `[ ]`.
+            // Need to strip the `[ ]` marker itself from the emitted text.
             if let Some(first) = spans.first_mut() {
                 first.start += consumed;
                 if first.start == first.end {
                     skip_spans = 1;
                 }
             }
-            // The task marker is a direct child of the list item, preceding
-            // its paragraph, rather than inline content inside that paragraph.
             self.actions
                 .push_back(Action::Event(Event::TaskListMarker(checked)));
         }
 
-        // Reserve room for Start + End + a rough per-line inline budget.
+        let content = &spans[skip_spans..];
         self.actions.reserve(3);
-
         self.actions
             .push_back(Action::Event(Event::Start(Tag::Paragraph)));
-        let content = &spans[skip_spans..];
+
         if !content.is_empty() {
             let root = parse_inline(self.inline_parser, self.buf, content, self.options);
             self.actions.push_back(Action::InlineParse(root));
@@ -2340,48 +2495,19 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
         self.actions.push_back(Action::Event(Event::End));
     }
 
-    fn emit_fenced_code(&mut self, info: Span, content: ContentLines) {
-        // SAFETY: self.buf always comes from `s` in `feed()` thus is always valid UTF-8
-        let mut info_str = crate::inline::unescape_string(unsafe {
-            &std::str::from_utf8_unchecked(&self.buf)[info]
-        });
-
-        // TODO: need to abstract this since it comes up twice?
-        // Must replace NUL per CommonMark specification
-        if bytes_has_nul(info_str.as_bytes()) {
-            info_str = info_str.replace('\0', "\u{FFFD}").into();
+    fn emit_fenced_code(&mut self, info: Span, content: ContentLines, is_math: bool) {
+        if self.should_emit_event_immediately() {
+            self.actions.push_back(Action::Event(Event::End));
+            return;
         }
 
-        if self.options.contains(Options::MATH_CODE)
-            && info_str.split_whitespace().next() == Some("math")
-        {
-            let tag = Tag::DisplayMath;
-            let content =
-                match self.defer_buffered_leaf(tag, content, BufferedLeafKind::DisplayMath) {
-                    Ok(()) => return,
-                    Err((_tag, content)) => content,
-                };
-            self.actions.reserve(content.len() + 2);
-            self.actions
-                .push_back(Action::Event(Event::Start(Tag::DisplayMath)));
-            self.emit_display_math_lines(content);
-            self.actions.push_back(Action::Event(Event::End));
+        let (tag, kind) = if is_math {
+            (Tag::DisplayMath, BufferedLeafKind::DisplayMath)
         } else {
-            let tag = if info_str.is_empty() {
-                Tag::CodeBlock(None)
-            } else {
-                Tag::CodeBlock(Some(info_str))
-            };
-            let (tag, content) =
-                match self.defer_buffered_leaf(tag, content, BufferedLeafKind::Code) {
-                    Ok(()) => return,
-                    Err(pair) => pair,
-                };
-            self.actions.reserve(content.len() + 2);
-            self.actions.push_back(Action::Event(Event::Start(tag)));
-            self.emit_code_lines(content);
-            self.actions.push_back(Action::Event(Event::End));
-        }
+            let tag = create_fenced_code_tag(self.buf, info);
+            (tag, BufferedLeafKind::Code)
+        };
+        self.defer_buffered_leaf(tag, content, kind);
     }
 
     fn emit_indented_code(&mut self, mut content: ContentLines) {
@@ -2392,31 +2518,35 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
         }) {
             content.pop();
         }
-        let tag = Tag::CodeBlock(None);
-        let (tag, content) = match self.defer_buffered_leaf(tag, content, BufferedLeafKind::Code) {
-            Ok(()) => return,
-            Err(pair) => pair,
-        };
-        self.actions.reserve(content.len() + 2);
-        self.actions.push_back(Action::Event(Event::Start(tag)));
-        self.emit_code_lines(content);
-        self.actions.push_back(Action::Event(Event::End));
+        self.defer_buffered_leaf(Tag::CodeBlock(None), content, BufferedLeafKind::Code);
     }
 
     fn emit_display_math(&mut self, content: ContentLines) {
-        let tag = Tag::DisplayMath;
-        let (tag, content) =
-            match self.defer_buffered_leaf(tag, content, BufferedLeafKind::DisplayMath) {
-                Ok(()) => return,
-                Err(pair) => pair,
-            };
-        self.actions.reserve(content.len() + 2);
-        self.actions.push_back(Action::Event(Event::Start(tag)));
-        self.emit_display_math_lines(content);
-        self.actions.push_back(Action::Event(Event::End));
+        if self.should_emit_event_immediately() {
+            self.actions.push_back(Action::Event(Event::End));
+            return;
+        }
+
+        self.defer_buffered_leaf(Tag::DisplayMath, content, BufferedLeafKind::DisplayMath);
+    }
+
+    fn emit_html_line(&mut self, span: Span) {
+        // SAFETY: `buf` is the &str content passed in from `feed()` so it's always valid UTF-8.
+        let text = unsafe { &std::str::from_utf8_unchecked(&self.buf)[span] };
+        let text = if bytes_has_nul(text.as_bytes()) {
+            cow_nul(text)
+        } else {
+            Cow::Borrowed(text)
+        };
+        self.actions.push_back(Action::Event(Event::Html(text)));
     }
 
     fn emit_html(&mut self, content: SmallVec<[Span; 4]>) {
+        if self.should_emit_event_immediately() {
+            self.actions.push_back(Action::Event(Event::End));
+            return;
+        }
+
         self.actions.reserve(content.len() + 2);
         self.actions
             .push_back(Action::Event(Event::Start(Tag::HtmlBlock)));
@@ -2529,7 +2659,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
 
             // Convert to buffer-relative span.
             let span = (offset + start)..(offset + end);
-            self.actions.reserve(3); // NOTE: use at all inconsistent with all other places; maybe change?
+            self.actions.reserve(3);
             self.actions
                 .push_back(Action::Event(Event::Start(Tag::TableCell)));
 
@@ -2635,6 +2765,7 @@ impl<'a> BlockCursor<'a> {
     }
 
     /// Consume whitespace until `pending >= target` or non-whitespace is hit.
+    /// Increments both `pending` *and* `pos` (to be one after the last consumed space).
     fn consume_many_space(&mut self, target: u16) -> bool {
         while self.pending < target && self.pos < self.bytes.len() {
             if !self.consume_space() {
