@@ -205,16 +205,38 @@ function highlightCode(root) {
     });
 }
 
-function markCompletedOutput(html) {
-    return html
-        .replace(
-            /(<span class="math math-(?:inline|display)">[\s\S]*?<\/span>)/g,
-            `$1${MATH_COMPLETE_MARKER}`,
-        )
-        .replace(
-            /(<pre><code class="language-[^"]+">[\s\S]*?<\/code><\/pre>)/g,
-            `$1${CODE_COMPLETE_MARKER}`,
-        );
+function createCompletionTracker() {
+    return {
+        codeDepth: 0,
+        mathDepth: 0,
+    };
+}
+
+function markCompletedOutput(html, tracker) {
+    // Opening tags, content, and closing tags commonly arrive in separate
+    // StreamingRenderer deltas. Track them across updates so the preview can
+    // keep streaming while expensive enhancement waits for a complete block.
+    return html.replace(
+        /<pre><code(?: class="[^"]*")?>|<\/code><\/pre>|<span class="math math-(?:inline|display)">|<\/span>/g,
+        token => {
+            if (token.startsWith('<pre><code')) {
+                tracker.codeDepth += 1;
+                return token;
+            }
+            if (token === '</code></pre>') {
+                if (tracker.codeDepth === 0) return token;
+                tracker.codeDepth -= 1;
+                return `${token}${CODE_COMPLETE_MARKER}`;
+            }
+            if (token.startsWith('<span class="math ')) {
+                tracker.mathDepth += 1;
+                return token;
+            }
+            if (tracker.mathDepth === 0) return token;
+            tracker.mathDepth -= 1;
+            return `${token}${MATH_COMPLETE_MARKER}`;
+        },
+    );
 }
 
 function observeStreamingFrame(doc) {
@@ -263,9 +285,9 @@ async function loadSample() {
     return response.text();
 }
 
-function readUpdate(update) {
+function readUpdate(update, completionTracker) {
     const value = {
-        html: markCompletedOutput(update.htmlDelta),
+        html: markCompletedOutput(update.htmlDelta, completionTracker),
         buffered: update.bufferedBytes,
     };
     update.free();
@@ -345,7 +367,7 @@ async function renderInstantly(markdown) {
         const started = performance.now();
         const rendered = renderMarkdown(markdown, options);
         const duration = performance.now() - started;
-        const html = markCompletedOutput(rendered);
+        const html = markCompletedOutput(rendered, createCompletionTracker());
         if (html) await sendOutputMessage(output, {
             type: 'chunk',
             html
@@ -482,6 +504,7 @@ async function streamDocument(markdown, {
 }) {
     const current = ++generation;
     const renderer = new StreamingRenderer(options);
+    const completionTracker = createCompletionTracker();
     const output = await createOutputStream(current);
     const chunkSize = animate ? 5 : 2048;
     let offset = 0;
@@ -523,7 +546,7 @@ async function streamDocument(markdown, {
                 editor.scrollTop = editor.scrollHeight;
             }
 
-            const update = readUpdate(renderer.push(chunk));
+            const update = readUpdate(renderer.push(chunk), completionTracker);
 
             if (update.html) {
                 await sendOutputMessage(output, {
@@ -545,7 +568,7 @@ async function streamDocument(markdown, {
             closeOutputStream(output, current, 'cancel');
             return;
         }
-        const finalUpdate = readUpdate(renderer.finish());
+        const finalUpdate = readUpdate(renderer.finish(), completionTracker);
         if (finalUpdate.html) {
             await sendOutputMessage(output, {
                 type: 'chunk',
