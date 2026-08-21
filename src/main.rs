@@ -48,7 +48,7 @@ fn main() {
         }
         // The interactive preview is intended to match a modern chat
         // renderer, so its useful extensions work without extra flags.
-        options |= Options::GFM | Options::MATH | Options::MATH_LATEX | Options::SKIP_ROOT_DEFERRED;
+        options |= Options::GFM | Options::MATH | Options::MATH_LATEX | Options::IMMEDIATE_MODE;
         if let Err(error) = web::run(options, paper_style) {
             eprintln!("web preview failed: {error}");
             std::process::exit(1);

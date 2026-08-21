@@ -117,11 +117,27 @@ pub(crate) enum Action<'a> {
     InlineParse(inline::InlineRoot),
 }
 
-// NOTE: Left as u32 for future expansion
+// NOTE: Left as u64 for future expansion
 /// Bitflag parser extensions. Example: [`Options::GFM`] enables GitHub-flavored markdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Options(u32);
+pub struct Options(u64);
 
+/*
+    TODO: To extend IMMEDIATE_MODE to the normal path (i.e. non-root), changes need to be done to the architecture w.r.t. leaf
+    parsing and event emission.
+
+    Broad Idea:
+    - Split out content into its own field. Remains empty for deferred output and tables.
+    - Avoid emitting events directly after parse. Instead, queue the parsed component (which could be provably constant-sized).
+    - At the end of Scanner::parse_line, run a function to take what was queued and emit or defer.
+
+    It could also be investigated whether LineStart/BlockStart can be reused to simplify this process.
+
+    This should cleanly enforce the invariants of this process (ensuring correctness both in terms of Rust and markdown parsing)
+    and make it easier to reason about what the code is actually doing. The changes involved are likely mostly around
+    moving and encapsulating the existing code along with some state machinery to represent the transition from
+    parsing -> decision -> emission | deferral. Likely a minimal change for the future.
+*/
 impl Options {
     /// GFM Tables extension.
     pub const TABLES: Self = Self(1 << 0);
@@ -146,7 +162,7 @@ impl Options {
     /// or the end of the document. This works because none of the lines have to be parsed inline and
     /// are **not** dependent on future lines -- which is why indented code block can't be added (needs
     /// lookahead to know whether a blank line closes it or is a continuation).
-    pub const SKIP_ROOT_DEFERRED: Self = Self(1 << 9);
+    pub const IMMEDIATE_MODE: Self = Self(1 << 9);
 
     pub const GFM: Self = Self(
         Self::TABLES.0
@@ -162,11 +178,11 @@ impl Options {
         Self(0)
     }
 
-    pub const fn from_bits(bits: u32) -> Self {
+    pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
 
-    pub const fn bits(self) -> u32 {
+    pub const fn bits(self) -> u64 {
         self.0
     }
 

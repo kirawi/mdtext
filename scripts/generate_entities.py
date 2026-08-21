@@ -9,7 +9,7 @@ def find_workspace_root():
     raise RuntimeError("could not locate Cargo.toml in current or parent directory")
 
 WORKSPACE_ROOT = find_workspace_root()
-ENTITIES_JSON_PATH = os.path.join(WORKSPACE_ROOT, "entities.json")
+ENTITIES_JSON_PATH = os.path.join(WORKSPACE_ROOT, "third_party", "entities.json")
 TARGET_RUST_FILE_PATH = os.path.join(WORKSPACE_ROOT, "src", "generated_entities.rs")
 
 # Can't output codepoint as-is because of quote entities.

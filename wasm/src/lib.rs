@@ -50,7 +50,7 @@ pub struct StreamingRenderer {
 #[wasm_bindgen]
 impl StreamingRenderer {
     #[wasm_bindgen(constructor)]
-    pub fn new(options_bits: u32) -> Self {
+    pub fn new(options_bits: u64) -> Self {
         let options = Options::from_bits(options_bits);
         Self {
             parser: Parser::with_options(options),
@@ -111,7 +111,7 @@ impl StreamingRenderer {
 
 /// Render a complete Markdown string in one call.
 #[wasm_bindgen]
-pub fn render(markdown: &str, options_bits: u32) -> String {
+pub fn render(markdown: &str, options_bits: u64) -> String {
     let options = Options::from_bits(options_bits);
     let mut writer = HtmlWriter::with_options(options);
     for event in Parser::parse_str(markdown, options) {
@@ -122,12 +122,12 @@ pub fn render(markdown: &str, options_bits: u32) -> String {
 
 /// Return the bitset for all GitHub-flavored Markdown extensions.
 #[wasm_bindgen(js_name = gfmOptions)]
-pub fn gfm_options() -> u32 {
-    (Options::GFM | Options::SKIP_ROOT_DEFERRED).bits()
+pub fn gfm_options() -> u64 {
+    (Options::GFM | Options::IMMEDIATE_MODE).bits()
 }
 
 /// Return the bitset for all supported math syntaxes.
 #[wasm_bindgen(js_name = mathOptions)]
-pub fn math_options() -> u32 {
+pub fn math_options() -> u64 {
     Options::MATH.bits()
 }

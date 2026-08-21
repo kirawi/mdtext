@@ -92,7 +92,7 @@ impl BlockParser {
 
         // Whether lines get emitted as events right away or not. It drastically improves latency at the cost
         // of the parser possibly being a little bit slower from mutating the events queue more often.
-        let skip_deferred = self.options.contains(Options::SKIP_ROOT_DEFERRED);
+        let skip_deferred = self.options.contains(Options::IMMEDIATE_MODE);
 
         // The line may be emitted verbatim IFF the line does not fulfill the closing condition for the
         // respective leaf.
@@ -313,7 +313,7 @@ impl BlockParser {
     // would have the correct spans from the start. should be easy?
     pub fn update_leaf_spans(&mut self, delta: usize) {
         let skip_root_deferred =
-            self.options.contains(Options::SKIP_ROOT_DEFERRED) && self.containers.is_empty();
+            self.options.contains(Options::IMMEDIATE_MODE) && self.containers.is_empty();
 
         // TODO: can maybe consolidate spans/contentlines in future? just need fix HTML
         fn shift_spans(spans: &mut SmallVec<[Span; 4]>, delta: usize) {
@@ -410,12 +410,11 @@ fn create_fenced_code_tag<'a>(buf: &'a [u8], info: Span) -> Tag<'a> {
         info_str = info_str.replace('\0', "\u{FFFD}").into();
     }
 
-    let tag = if info_str.is_empty() {
+    if info_str.is_empty() {
         Tag::CodeBlock(None)
     } else {
         Tag::CodeBlock(Some(info_str))
-    };
-    tag
+    }
 }
 
 // The `u8`s are delimiters
@@ -730,7 +729,7 @@ pub struct Scanner<'s, 'a: 's> {
 
 impl<'s, 'a: 's> Scanner<'s, 'a> {
     fn should_emit_event_immediately(&self) -> bool {
-        self.options.contains(Options::SKIP_ROOT_DEFERRED) && self.containers.is_empty()
+        self.options.contains(Options::IMMEDIATE_MODE) && self.containers.is_empty()
     }
 
     // This more-or-less follows the algorithm provided in the CommonMark specification's apendix.
@@ -806,7 +805,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                     } else {
                         // Non-empty lines MUST be indented >= `content_indent` to be part of the
                         // list item.
-                        let mut c = self.cursor.clone(); // Needed for backtracking
+                        let mut c = self.cursor; // Needed for backtracking
                         while c.pending < content_indent as u16
                             && c.pos < self.bytes.len()
                             && c.consume_space()
@@ -927,7 +926,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 // Check if this is a closing fence; which must be *at least* as long as the opening fence
                 // Need to rollback cursor if the check fails lest we lose indentation information as code
                 // blocks must preserve indentation.
-                let c = self.cursor.clone();
+                let c = self.cursor;
                 self.cursor.consume_many_space(3);
                 if self.cursor.pending <= 3
                     && self.cursor.pos < self.bytes.len()
@@ -974,7 +973,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
 
                 // The line must be indented at least 4 spaces to be part of the indented code block
                 // Save cursor for rollback so that HTML block preserves indentation later.
-                let c = self.cursor.clone();
+                let c = self.cursor;
                 self.cursor.consume_many_space(4);
                 if self.cursor.remaining_is_blank() {
                     // Blank lines must have their whitespace preserved literally. They're not required
@@ -1258,10 +1257,9 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                         }
                     }
 
-                    match self.create_block(kind) {
-                        true => return, // Leaf opened; cannot contain more leafs per spec so return
-                        false => {}     // Container opened
-                    }
+                    if self.create_block(kind) {
+                        return; // Leaf opened; cannot contain more leafs per spec so return
+                    } // Container opened
                 }
                 _ => return,
             }
@@ -1729,7 +1727,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
 
         // Backtracking is unavoidable to correctly parse list items as parsing for setext/thematic break/table
         // mutates cursor state. We'd lose info on starting content bytes in line.
-        let c = self.cursor.clone();
+        let c = self.cursor;
         let create_list_start = |this: &mut Self| {
             let is_blank = this.cursor.pos >= this.bytes.len();
             let trailing_ws = this.cursor.pending - marker_indent as u16;
@@ -1788,25 +1786,28 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                             self.cursor.add_tab();
                         }
                         b'|' if is_paragraph && !maybe_lazy && !is_list => {
-                            if self.options.contains(Options::TABLES) && !not_table {
-                                if let Some(alignments) = self.try_table_delim(
+                            if self.options.contains(Options::TABLES)
+                                && !not_table
+                                && let Some(alignments) = self.try_table_delim(
                                     1,
                                     prev_line_bytes.expect("paragraph context has a table header"),
-                                ) {
-                                    return LineStart::Table(alignments);
-                                }
+                                )
+                            {
+                                return LineStart::Table(alignments);
                             }
                             return LineStart::Text;
                         }
                         b':' if is_paragraph && !maybe_lazy && !is_list => {
                             // `:` after whitespace is invalid (colons may not be separate from dashes).
-                            if self.options.contains(Options::TABLES) && !seen_ws && !not_table {
-                                if let Some(alignments) = self.try_table_delim(
+                            if self.options.contains(Options::TABLES)
+                                && !seen_ws
+                                && !not_table
+                                && let Some(alignments) = self.try_table_delim(
                                     1,
                                     prev_line_bytes.expect("paragraph context has a table header"),
-                                ) {
-                                    return LineStart::Table(alignments);
-                                }
+                                )
+                            {
+                                return LineStart::Table(alignments);
                             }
                             return LineStart::Text;
                         }
@@ -1830,10 +1831,8 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 } else if is_list {
                     self.cursor = c;
                     self.cursor.consume_many_space(u16::MAX);
-                    if self.cursor.pos >= self.bytes.len() {
-                        if blank_may_not_interrupt {
-                            return LineStart::Text;
-                        }
+                    if self.cursor.pos >= self.bytes.len() && blank_may_not_interrupt {
+                        return LineStart::Text;
                     }
                     return create_list_start(self);
                 }
@@ -1868,10 +1867,8 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 } else if is_list {
                     self.cursor = c;
                     self.cursor.consume_many_space(u16::MAX);
-                    if self.cursor.pos >= self.bytes.len() {
-                        if blank_may_not_interrupt {
-                            return LineStart::Text;
-                        }
+                    if self.cursor.pos >= self.bytes.len() && blank_may_not_interrupt {
+                        return LineStart::Text;
                     }
                     return create_list_start(self);
                 }
@@ -1886,12 +1883,10 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
                 }
 
                 self.cursor.consume_many_space(u16::MAX);
-                if self.cursor.pos >= self.bytes.len() {
-                    if blank_may_not_interrupt {
-                        return LineStart::Text;
-                    }
+                if self.cursor.pos >= self.bytes.len() && blank_may_not_interrupt {
+                    return LineStart::Text;
                 }
-                return create_list_start(self);
+                create_list_start(self)
             }
 
             b'_' => {
@@ -2532,7 +2527,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
 
     fn emit_html_line(&mut self, span: Span) {
         // SAFETY: `buf` is the &str content passed in from `feed()` so it's always valid UTF-8.
-        let text = unsafe { &std::str::from_utf8_unchecked(&self.buf)[span] };
+        let text = unsafe { &std::str::from_utf8_unchecked(self.buf)[span] };
         let text = if bytes_has_nul(text.as_bytes()) {
             cow_nul(text)
         } else {
@@ -2557,7 +2552,7 @@ impl<'s, 'a: 's> Scanner<'s, 'a> {
 
         for sp in content {
             // SAFETY: `buf` is the &str content passed in from `feed()` so it's always valid UTF-8.
-            let text = unsafe { &std::str::from_utf8_unchecked(&self.buf)[sp] };
+            let text = unsafe { &std::str::from_utf8_unchecked(self.buf)[sp] };
             let text = if may_have_nul {
                 cow_nul(text)
             } else {

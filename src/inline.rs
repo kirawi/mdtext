@@ -2678,7 +2678,7 @@ fn classify_delim_run(prev: Option<char>, next: Option<char>, delim: u8, options
 
     // * ~ * have different rules for if they can open/close emphasis per spec
     if delim == b'*' || delim == b'~' {
-        u8::from(is_left_flanking) * CAN_OPEN | u8::from(is_right_flanking) * CAN_CLOSE
+        (u8::from(is_left_flanking) * CAN_OPEN) | (u8::from(is_right_flanking) * CAN_CLOSE)
     } else {
         let prev_is_punct = prev.is_some_and(|ch| is_unicode_punctuation(ch, options));
         let next_is_punct = next.is_some_and(|ch| is_unicode_punctuation(ch, options));
