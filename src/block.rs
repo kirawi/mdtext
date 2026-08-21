@@ -2683,7 +2683,7 @@ fn content_lines_may_have_nul(buf: &[u8], lines: &ContentLines) -> bool {
 fn content_line_to_cow<'a>(buf: &'a [u8], line: ContentLine, may_have_nul: bool) -> Cow<'a, str> {
     // SAFETY: `buf` always comes from the valid str passed to `feed()`.
     // TODO: maybe switch parser tyoe from u8 to str slice to reduce unsafe?
-    let text = unsafe { &std::str::from_utf8_unchecked(&buf)[line.span] };
+    let text = unsafe { &std::str::from_utf8_unchecked(buf)[line.span] };
 
     if line.leading_virt_spaces == 0 {
         if may_have_nul {

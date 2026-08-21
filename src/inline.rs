@@ -221,14 +221,14 @@ pub fn parse_inline<'a, 's>(
     }
 }
 
-fn take_cowstr<'s, 'a>(cowstrs: &'s mut [Cow<'a, str>], index: usize) -> Cow<'a, str> {
+fn take_cowstr<'a>(cowstrs: &mut [Cow<'a, str>], index: usize) -> Cow<'a, str> {
     debug_assert!(index < cowstrs.len());
     // SAFETY: `index` is always actual index  returned when inserting strings into the arena;
     // it is never arbitrarily constructed.
     std::mem::take(unsafe { cowstrs.get_unchecked_mut(index) })
 }
 
-fn take_link<'s, 'a>(links: &'s mut [LinkInfo<'a>], index: usize) -> LinkInfo<'a> {
+fn take_link<'a>(links: &mut [LinkInfo<'a>], index: usize) -> LinkInfo<'a> {
     debug_assert!(index < links.len());
     // SAFETY: `index` is always actual index returned when inserting linkdata into the arena;
     // it is never arbitrarily constructed.
@@ -757,8 +757,8 @@ impl<'a, 's> InlineParser<'a, 's> {
         self.disable_links();
         let index = self.links.len();
         self.links.push(LinkInfo {
-            uri: uri.into(),
-            title: title.map(Into::into),
+            uri: uri,
+            title: title,
         });
         let link = self.push_node(InlineData::Link(index));
         let visible = self.alloc_cowstr(visible);
@@ -1583,9 +1583,7 @@ impl<'a, 's> InlineParser<'a, 's> {
             let ws_start = p;
             scan_ws(&self.ld, &mut p);
 
-            if self.ld.byte_at_location(p).is_none() {
-                return None;
-            }
+            self.ld.byte_at_location(p)?;
 
             // Closed without further attributes? Either > or />
             if self.ld.byte_at_location(p) == Some(b'>') {
@@ -1626,9 +1624,7 @@ impl<'a, 's> InlineParser<'a, 's> {
                 self.ld.advance_location(&mut p);
                 scan_ws(&self.ld, &mut p);
 
-                if self.ld.byte_at_location(p).is_none() {
-                    return None;
-                }
+                self.ld.byte_at_location(p)?;
 
                 // Unquoted value?
                 if !matches!(self.ld.byte_at_location(p), Some(b'"' | b'\'')) {
@@ -1659,9 +1655,7 @@ impl<'a, 's> InlineParser<'a, 's> {
                         self.ld.advance_location(&mut p);
                     }
 
-                    if self.ld.byte_at_location(p).is_none() {
-                        return None;
-                    }
+                    self.ld.byte_at_location(p)?;
                     self.ld.advance_location(&mut p);
                 }
             } else {
@@ -2033,7 +2027,7 @@ impl<'a, 's> InlineParser<'a, 's> {
         while let Some(c) = self.ld.current_char() {
             if c == '.' {
                 saw_period = true;
-                saw_underscores = saw_underscores << 1;
+                saw_underscores <<= 1;
                 self.ld.pos += 1;
             } else if c == '_' {
                 saw_underscores |= 1;
@@ -2330,7 +2324,7 @@ impl<'a, 's> InlineParser<'a, 's> {
 
             let container = if closer_delim == b'~' {
                 InlineData::Strikethrough
-            } else if used % 2 == 0 {
+            } else if used.is_multiple_of(2) {
                 InlineData::Strong
             } else {
                 InlineData::Emphasis
@@ -2476,10 +2470,10 @@ fn try_parse_entity_ref(bytes: &[u8]) -> EntityParse {
         };
 
         // need to skip over ;
-        return EntityParse::Valid {
+        EntityParse::Valid {
             decoded: ch.to_string().into(),
             consumed: end + 1,
-        };
+        }
     } else {
         // Named entities
         let mut end = start;
@@ -2508,17 +2502,17 @@ fn try_parse_entity_ref(bytes: &[u8]) -> EntityParse {
             .ok()
             .map(|i| ENTITIES[i].1)
         {
-            return EntityParse::Valid {
+            EntityParse::Valid {
                 decoded: e.into(),
                 consumed: end + 1,
-            };
+            }
         } else {
             // Not a valid entity. Consume & as literal. Need rescan all else for other inline.
             // In practice: only matter if extended autoline since other inline parse depend on punctuation
-            return EntityParse::Invalid {
+            EntityParse::Invalid {
                 consumed: end + 1,
                 rescan: true,
-            };
+            }
         }
     }
 }
@@ -2684,7 +2678,7 @@ fn classify_delim_run(prev: Option<char>, next: Option<char>, delim: u8, options
         let next_is_punct = next.is_some_and(|ch| is_unicode_punctuation(ch, options));
         let can_open = is_left_flanking && (!is_right_flanking || prev_is_punct);
         let can_close = is_right_flanking && (!is_left_flanking || next_is_punct);
-        u8::from(can_open) * CAN_OPEN | u8::from(can_close) * CAN_CLOSE
+        (u8::from(can_open) * CAN_OPEN) | (u8::from(can_close) * CAN_CLOSE)
     }
 }
 
@@ -2889,7 +2883,7 @@ fn contains_mailto(bytes: &[u8]) -> bool {
 fn contains_pattern_scalar<const N: usize>(bytes: &[u8], pattern: &[u8; N]) -> bool {
     let mut i = 0;
     while i + N <= bytes.len() {
-        if &bytes[i..i + N] == &pattern[..] {
+        if bytes[i..i + N] == pattern[..] {
             return true;
         }
         i += 1;
@@ -3392,7 +3386,7 @@ mod simd {
             }
             let mut i = i.saturating_sub(N - 1);
             while i + N <= bytes.len() {
-                if &bytes[i..i + N] == &pattern[..] {
+                if bytes[i..i + N] == pattern[..] {
                     return true;
                 }
                 i += 1;
@@ -3429,7 +3423,7 @@ mod simd {
             }
             let mut i = i.saturating_sub(N - 1);
             while i + N <= bytes.len() {
-                if &bytes[i..i + N] == &pattern[..] {
+                if bytes[i..i + N] == pattern[..] {
                     return true;
                 }
                 i += 1;
@@ -3460,7 +3454,7 @@ mod simd {
             }
             let mut i = i.saturating_sub(N - 1);
             while i + N <= bytes.len() {
-                if &bytes[i..i + N] == &pattern[..] {
+                if bytes[i..i + N] == pattern[..] {
                     return true;
                 }
                 i += 1;

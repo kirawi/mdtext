@@ -182,11 +182,11 @@ impl HtmlWriter {
                     // Put in the dang title after the nested images are handled (seriously, who decided
                     // to allow nested images in the first place? so stupid)
                     if self.image_depth == 0 {
-                        self.output.push_str("\"");
+                        self.output.push('"');
                         if let Some(title) = self.image_title.take() {
                             self.output.push_str(" title=\"");
                             escape_attr(&mut self.output, &title);
-                            self.output.push_str("\"");
+                            self.output.push('"');
                         }
                         self.output.push_str(" />");
                     }
