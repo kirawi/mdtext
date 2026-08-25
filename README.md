@@ -1,4 +1,5 @@
 [![Crates.io](https://img.shields.io/crates/v/mdtext.svg)](https://crates.io/crates/mdtext)
+[![Documentation](https://docs.rs/mdtext/badge.svg)](https://docs.rs/mdtext)
 
 `mdtext` is a fully incremental/streaming markdown parser created to be used to render LLM streaming generation. The library is human-written for the sake of performance, correctness, and architectural robustness. It is about as fast as `pulldown-cmark` on a full document parse.
 
