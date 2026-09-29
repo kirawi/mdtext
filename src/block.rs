@@ -304,6 +304,39 @@ impl BlockParser {
         self.leaf.is_some()
     }
 
+    /// Earliest byte in the feed buffer still referenced by the open leaf.
+    /// i.e. strictly no byte before this is necessary for parsing
+    pub fn retained_from(&self) -> Option<usize> {
+        let root_immediate =
+            self.options.contains(Options::IMMEDIATE_MODE) && self.containers.is_empty();
+        match &self.leaf {
+            Some(Leaf::Paragraph(spans, _)) => spans.first().map(|span| span.start),
+            Some(Leaf::FencedCode {
+                info,
+                content,
+                is_math,
+                ..
+            }) if !root_immediate => {
+                let info = (!*is_math && info.start != info.end).then_some(info.start);
+                let content = content.first().map(|span| span.start);
+                match (info, content) {
+                    (Some(info), Some(content)) => Some(info.min(content)),
+                    (Some(start), None) | (None, Some(start)) => Some(start),
+                    (None, None) => None,
+                }
+            }
+            Some(Leaf::IndentedCode(content)) => content.first().map(|span| span.start),
+            Some(Leaf::Math { content, .. }) if !root_immediate => {
+                content.first().map(|span| span.start)
+            }
+            Some(Leaf::Html { content, .. }) if !root_immediate => {
+                content.first().map(|span| span.start)
+            }
+            // Anything else does not need to reference prior content.
+            _ => None,
+        }
+    }
+
     /// Shift source spans to match a feed buffer with `delta` bytes removed from their front.
     /// This is necessary so that the consumer can safely drop already consumed text. Otherwise, there
     /// would be out-of-bounds accesses.
@@ -332,11 +365,25 @@ impl BlockParser {
 
         match self.leaf.as_mut() {
             Some(Leaf::Paragraph(spans, _)) => shift_spans(spans, delta),
-            Some(Leaf::FencedCode { info, content, .. }) => {
+            Some(Leaf::FencedCode {
+                info,
+                content,
+                is_math,
+                ..
+            }) => {
                 if !skip_root_deferred {
                     // These fields are ignored when skipping deferred output
-                    info.start -= delta;
-                    info.end -= delta;
+                    if !*is_math {
+                        if info.start == info.end {
+                            // An empty `info` isn't retained context and it's a line-by-line sliding window
+                            // rather than retaining input from the opener line. Set to 0..0 as a safe sentinel.
+                            // TODO: make `info` an `Option`
+                            *info = 0..0;
+                        } else {
+                            info.start -= delta;
+                            info.end -= delta;
+                        }
+                    }
                     shift_content(content, delta);
                 }
             }

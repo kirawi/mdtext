@@ -788,6 +788,51 @@ fn extension_output_is_independent_of_bufread_chunk_boundaries() {
 }
 
 #[test]
+fn immediate_leaf_releases_emitted_lines_while_open() {
+    let source = "```rust\nlet a = 1;\n";
+    let mut parser = Parser::with_options(Options::IMMEDIATE_MODE);
+    let (events, consumed) = parser.feed_chunk(source);
+
+    assert!(events.contains(&Event::Code("let a = 1;\n".into())));
+    assert_eq!(consumed, source.len());
+}
+
+#[test]
+fn deferred_leaf_retains_from_its_own_opening_line() {
+    let source = "a | b\n--- | ---\n1 | 2\n\npending\n";
+    let pending = source.find("pending").unwrap();
+    let mut parser = Parser::with_options(Options::TABLES | Options::IMMEDIATE_MODE);
+    let (_, consumed) = parser.feed_chunk(source);
+
+    assert_eq!(consumed, pending);
+    assert_eq!(&source[consumed..], "pending\n");
+}
+
+#[test]
+fn exact_retained_suffix_survives_compaction_across_chunk_boundaries() {
+    let source = "a | b\n--- | ---\n1 | 2\n\n  pending\ncontinued\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n\n> ```\n> nested\n> ```\n";
+    let options = Options::TABLES | Options::IMMEDIATE_MODE;
+    let expected = Parser::parse_str(source, options);
+
+    for chunk in 1..=11 {
+        let mut parser = Parser::with_options(options);
+        let mut events = Vec::new();
+        let mut retained = 0;
+        let mut available = 0;
+
+        while available < source.len() {
+            available = (available + chunk).min(source.len());
+            let (next, consumed) = parser.feed_chunk(&source[retained..available]);
+            events.extend(next);
+            retained += consumed;
+        }
+        events.extend(parser.finish(&source[retained..]));
+
+        assert_eq!(events, expected, "chunk size {chunk}");
+    }
+}
+
+#[test]
 fn tables_stream_many_rows_and_cap_synthesized_cells() {
     let mut many_rows = String::from("a | b\n--- | ---\n");
     for row in 0..2_000 {

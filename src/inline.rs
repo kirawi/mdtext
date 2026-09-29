@@ -754,12 +754,10 @@ impl<'a, 's> InlineParser<'a, 's> {
 
     /// Push a link and deactivate prior potential (unmatched) link openers; they are no longer valid.
     fn push_link(&mut self, uri: Cow<'a, str>, title: Option<Cow<'a, str>>, visible: Cow<'a, str>) {
-        self.disable_links();
         let index = self.links.len();
-        self.links.push(LinkInfo {
-            uri: uri,
-            title: title,
-        });
+        self.disable_links();
+        self.links.push(LinkInfo { uri, title });
+
         let link = self.push_node(InlineData::Link(index));
         let visible = self.alloc_cowstr(visible);
         let child = self.forest.create_node(InlineData::Text(visible));

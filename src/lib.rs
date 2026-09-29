@@ -257,9 +257,16 @@ impl Parser {
         }
     }
 
+    /// Largest prefix of the current feed buffer no longer referenced by parser state.
+    fn retained_input_start(&self) -> usize {
+        self.block_parser.retained_from().unwrap_or(self.line_start)
+    }
+
     /// Feed a chunk of text to the parser and receive `(events, read)`.
     /// - `events` is non-empty IFF a block has been fully parsed.
-    /// - `read` is non-zero IFF `events` is non-empty. Subsequent calls must then feed `&s[read..]` for valid parsing.
+    /// - `read` is the largest leading number of bytes the parser no longer references. It may be
+    ///   non-zero even when `events` is empty. Subsequent calls must then feed `&s[read..]` for
+    ///   valid parsing.
     pub fn feed_chunk<'a>(&mut self, s: &'a str) -> (VecDeque<Event<'a>>, usize) {
         let mut iter = self.feed(s);
         let events = iter.by_ref().collect();
@@ -299,10 +306,7 @@ impl Parser {
                 buf: s.as_bytes(),
                 actions: VecDeque::new(),
                 active_event_source: None,
-                mode: IteratorMode::Feed {
-                    pos,
-                    output_line_start: 0,
-                },
+                mode: IteratorMode::Feed { pos },
             },
         }
     }
@@ -342,8 +346,6 @@ struct InnerEventIterator<'p, 'a> {
 enum IteratorMode {
     Feed {
         pos: usize,
-        /// Start of the most recent physical line whose parse produced output.
-        output_line_start: usize,
     },
     Finish {
         state: FinishState,
@@ -363,23 +365,17 @@ enum EventOutputSource<'a> {
 }
 
 impl<'p, 'a> EventIterator<'p, 'a> {
-    /// Returns the number of bytes that were read **AND** parsed. The caller MUST exclude these bytes from future reads for valid parsing.
-    /// i.e. `buf[consumed..]`. ALWAYS call this after consuming the iterator!
+    /// Returns the number of bytes the parser no longer references. The caller MUST exclude these
+    /// bytes from future reads for valid parsing, i.e. retain only `buf[consumed..]`. ALWAYS call
+    /// this after consuming the iterator!
     pub fn consumed(&self) -> usize {
-        let IteratorMode::Feed {
-            output_line_start, ..
-        } = self.inner.mode
-        else {
+        let IteratorMode::Feed { .. } = self.inner.mode else {
             // Only returned when we're finishing!
             // Entire input is consumed.
             return self.inner.buf.len();
         };
 
-        if self.inner.parser.block_parser.leaf_is_open() {
-            output_line_start
-        } else {
-            self.inner.parser.line_start
-        }
+        self.inner.parser.retained_input_start()
     }
 }
 
@@ -514,11 +510,7 @@ impl<'p, 'a> Iterator for InnerEventIterator<'p, 'a> {
                 }
             }
 
-            let IteratorMode::Feed {
-                pos,
-                output_line_start,
-            } = &mut self.mode
-            else {
+            let IteratorMode::Feed { pos } = &mut self.mode else {
                 unreachable!()
             };
 
@@ -586,8 +578,6 @@ impl<'p, 'a> Iterator for InnerEventIterator<'p, 'a> {
                 *pos = next_line_start;
 
                 if let Some(mut events) = buffered {
-                    // Created events; drop old text
-                    *output_line_start = line_start;
                     self.parser.current_pos = *pos;
 
                     // SAFETY: `BufferedLeafEvents` is created IFF there it has parsed a leaf (i.e. it has
@@ -598,8 +588,6 @@ impl<'p, 'a> Iterator for InnerEventIterator<'p, 'a> {
                 }
 
                 if !self.actions.is_empty() {
-                    // Created events; drop old text
-                    *output_line_start = line_start;
                     self.parser.current_pos = *pos;
 
                     // We have inline events to return!
@@ -619,29 +607,15 @@ impl Drop for InnerEventIterator<'_, '_> {
 
             self.parser.block_parser.reset_inline();
 
-            let IteratorMode::Feed {
-                pos,
-                output_line_start,
-            } = self.mode
-            else {
+            let IteratorMode::Feed { pos } = self.mode else {
                 unreachable!()
             };
 
-            // Update the parent parser's position so that it knows what content it needs for future feeds.
-            if self.parser.block_parser.leaf_is_open() {
-                let consumed = output_line_start;
-                self.parser.block_parser.update_leaf_spans(consumed);
-                self.parser.line_start -= consumed;
-                self.parser.current_pos = pos - consumed;
-            } else {
-                // We consumed a block and thus we must prep the parser to be ready for the next block!
-                let consumed = self.parser.line_start;
-                self.parser.line_start = 0;
-
-                // this will always be valid since the consumed bytes must be included in the new block
-                // TODO: fix bad comment above...
-                self.parser.current_pos = pos - consumed;
-            }
+            // Update the parent parser's state so that it knows what content it needs for future feeds.
+            let consumed = self.parser.retained_input_start();
+            self.parser.block_parser.update_leaf_spans(consumed);
+            self.parser.line_start -= consumed;
+            self.parser.current_pos = pos - consumed;
         } else {
             self.parser.block_parser.reset_inline();
         }
