@@ -4,6 +4,7 @@ mod inline;
 mod tagfilter;
 mod utils;
 
+#[cfg(feature = "html")]
 pub mod html;
 
 use std::borrow::Cow;

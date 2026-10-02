@@ -1,3 +1,5 @@
+#![cfg(feature = "html")]
+
 // WARNING: All code here was written by LLMs based on bugs encountered while writing the library.
 // Pending human review.
 
