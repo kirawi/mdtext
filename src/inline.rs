@@ -1880,17 +1880,13 @@ impl<'a, 's> InlineParser<'a, 's> {
         }
 
         // Backtracking is unavoidable here!
-        let mut start = self.ld.pos - 1; // one before @ symbol
+        let mut start = self.ld.pos; // at the `@` symbol
 
         // Must not interfere with text we've already emitted events for
-        while start >= self.pending_text_start {
-            let b = self.ld.get_unchecked(start);
+        while start > self.pending_text_start {
+            let b = self.ld.get_unchecked(start - 1);
             if !(b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+')) {
-                start += 1; // don't overextend (needed for flush_text)
-                break;
-            }
-            if start == self.pending_text_start {
-                break;
+                break; // don't overextend (needed for flush_text)
             }
             start -= 1;
         }

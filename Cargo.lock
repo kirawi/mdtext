@@ -373,6 +373,7 @@ dependencies = [
  "markup5ever_rcdom",
  "memchr",
  "pulldown-cmark",
+ "quickcheck",
  "rand",
  "smallvec",
  "unicode-general-category",
@@ -558,6 +559,15 @@ name = "pulldown-cmark-escape"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
+name = "quickcheck"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95c589f335db0f6aaa168a7cd27b1fc6920f5e1470c804f814d9cd6e62a0f70b"
+dependencies = [
+ "rand",
+]
 
 [[package]]
 name = "quote"
