@@ -824,8 +824,15 @@ impl<'a, 's> InlineParser<'a, 's> {
     fn try_parse_latex_math(&mut self, display: bool) {
         let initial = self.ld.location();
         let mut content_start = initial;
+
+        // consume `\` + `[` / `(`
         if !self.ld.advance_location_by(&mut content_start, 2) {
-            // consume `\` + `[` / `(`
+            // Reparse as escaped char
+            if display {
+                self.latex_display_exhausted = true;
+            } else {
+                self.latex_inline_exhausted = true;
+            }
             return;
         }
 

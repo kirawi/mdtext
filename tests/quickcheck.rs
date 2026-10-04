@@ -1,10 +1,11 @@
 #![cfg(feature = "html")]
 
-use mdtext::{Options, Parser};
 use mdtext::html::HtmlWriter;
+use mdtext::{Options, Parser};
 use quickcheck::QuickCheck;
 
-const SUPPORTED_OPTIONS: u64 = Options::GFM.bits() | Options::MATH.bits() | Options::IMMEDIATE_MODE.bits();
+const SUPPORTED_OPTIONS: u64 =
+    Options::GFM.bits() | Options::MATH.bits() | Options::IMMEDIATE_MODE.bits();
 
 #[test]
 fn streaming_and_complete_parsing_produce_identical_html() {
@@ -20,8 +21,12 @@ fn streaming_and_complete_parsing_produce_identical_html() {
         let mut pending = String::new();
         let mut start = 0;
         let chunk_chars = usize::from(chunk_size % 16) + 1;
-        for end in source.char_indices().skip(chunk_chars).step_by(chunk_chars)
-            .map(|(index, _)| index).chain(std::iter::once(source.len()))
+        for end in source
+            .char_indices()
+            .skip(chunk_chars)
+            .step_by(chunk_chars)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(source.len()))
         {
             pending.push_str(&source[start..end]);
             start = end;
@@ -37,11 +42,15 @@ fn streaming_and_complete_parsing_produce_identical_html() {
         for event in parser.finish_iter(&pending) {
             streaming.push_event(&event);
         }
-        assert_eq!(streaming.into_string(), complete.into_string(), "options: {options:?}, chunk_chars: {chunk_chars}");
+        assert_eq!(
+            streaming.into_string(),
+            complete.into_string(),
+            "options: {options:?}, chunk_chars: {chunk_chars}"
+        );
         true
     }
 
     QuickCheck::new()
-        .tests(1_000)
+        .tests(10_000)
         .quickcheck(property as fn(String, u16, u8) -> bool);
 }
