@@ -258,6 +258,14 @@ impl Parser {
         }
     }
 
+    /// Drop all parse state so the parser can be reused for a fresh stream. Retains `options` and any arenas.
+    pub fn reset(&mut self) {
+        self.block_parser.reset();
+        self.line_start = 0;
+        self.current_pos = 0;
+        self.finished = false;
+    }
+
     /// Largest prefix of the current feed buffer no longer referenced by parser state.
     fn retained_input_start(&self) -> usize {
         self.block_parser.retained_from().unwrap_or(self.line_start)

@@ -439,6 +439,13 @@ impl BlockParser {
     pub fn reset_inline(&mut self) {
         self.inline_parser.reset();
     }
+
+    /// Drop all parse state, retaining `options` and reusable vector allocations.
+    pub fn reset(&mut self) {
+        self.containers.clear();
+        self.leaf = None;
+        self.inline_parser.reset();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
